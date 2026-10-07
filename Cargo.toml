@@ -1,14 +1,25 @@
 [package]
 name = "aliyunpan"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Unofficial async Rust SDK for the Aliyun Drive (alipan.com) web API"
 license = "MIT"
 readme = "README.md"
-include = ["/src/**", "/tests/**", "/examples/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/examples/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
 keywords = ["aliyunpan", "alipan", "aliyundrive", "cloud-storage", "sdk"]
 categories = ["api-bindings", "asynchronous"]
+authors = ["mingcheng <mingcheng@apache.org>"]
+repository = "https://github.com/mingcheng/aliyunpan"
+homepage = "https://github.com/mingcheng/aliyunpan"
 
 [features]
 default = ["rustls"]
