@@ -171,6 +171,7 @@ Run the checks that do not require an account:
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --lib --test mock
+cargo test --locked --example web_api_check
 cargo test --locked --doc
 cargo +1.85.0 test --locked --lib --test mock
 cargo doc --locked --no-deps
