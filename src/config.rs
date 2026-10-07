@@ -44,8 +44,8 @@ impl Default for Config {
             user_agent:
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
                     .into(),
-            device_name: "Chrome浏览器".into(),
-            model_name: "Windows网页版".into(),
+            device_name: "Chrome Web Browser".into(),
+            model_name: "Windows Web Version".into(),
             chunk_size: DEFAULT_CHUNK_SIZE,
             max_retries: 10,
             retry_delay: Duration::from_secs(2),
