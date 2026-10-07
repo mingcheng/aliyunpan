@@ -309,6 +309,13 @@ even when the renewal itself is blocked. A successful post-failure check proves
 session recovery, **not** successful renewal. On success, the suite renews a
 second time and repeats the signed check to validate continued nonce progression.
 
+Live verification on 2026-10-07 still returned `DeviceSessionSignatureInvalid`
+after advancing the nonce. Both signed health checks passed, with session
+recreation after the rejection. Nonce progression alone has therefore **not**
+resolved server compatibility; renewal remains a priority BLOCKED case, not
+a validated capability. Refresh-token rotation and immediate secret persistence
+passed independently.
+
 The full suite uses the SDK's 60-second request/read timeout rather than the
 30-second smoke-check timeout. Transfer GETs and PUTs retry connect/read timeouts
 before response headers, within `max_retries`, replaying the same immutable part.
