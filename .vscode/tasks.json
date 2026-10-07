@@ -1,0 +1,113 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "cargo-test-mock",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"--locked",
+				"--lib",
+				"--test",
+				"mock"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "cargo-test-doc",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"--locked",
+				"--doc"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "cargo-clippy-all",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"clippy",
+				"--locked",
+				"--all-targets",
+				"--",
+				"-D",
+				"warnings"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "cargo-fmt-check",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"fmt",
+				"--all",
+				"--",
+				"--check"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "cargo-package",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"package",
+				"--locked"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-workflows",
+			"type": "shell",
+			"command": "actionlint",
+			"args": [
+				".github/workflows/cargo.yml",
+				".github/workflows/crates.yml"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-msrv",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"+1.85.0",
+				"test",
+				"--locked",
+				"--lib",
+				"--test",
+				"mock"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-docs",
+			"type": "shell",
+			"command": "env",
+			"args": [
+				"RUSTDOCFLAGS=-D warnings",
+				"cargo",
+				"doc",
+				"--locked",
+				"--no-deps"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "cargo-check",
+			"type": "shell",
+			"command": "cargo fmt --all -- --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --lib --test mock && cargo test --locked --doc",
+			"group": "test",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

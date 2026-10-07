@@ -1,0 +1,151 @@
+#!#
+# Copyright (c) 2025 Hangzhou Guanwaii Technology Co., Ltd.
+#
+# This source code is licensed under the MIT License,
+# which is located in the LICENSE file in the source tree's root directory.
+#
+# File: rust.yml
+# Author: mingcheng <mingcheng@apache.org>
+# File Created: 2025-03-05 11:10:40
+#
+# Modified By: mingcheng <mingcheng@apache.org>
+# Last Modified: 2025-10-22 00:33:40
+##
+
+name: Cargo Build & Test
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Code quality checks (clippy and rustfmt)
+  lint:
+    name: Lint (clippy & rustfmt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install native TLS dependencies
+        run: sudo -n apt-get update && sudo -n apt-get install -y pkg-config libssl-dev
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run cargo fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+
+  # Security audit
+  security_audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  # Build and test on the minimum supported version and current Rust channels.
+  build_and_test:
+    name: Build & Test (${{ matrix.toolchain }}, ${{ matrix.tls }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - "1.85.0"
+          - stable
+          - beta
+          - nightly
+        tls:
+          - rustls
+        include:
+          - toolchain: stable
+            tls: native-tls
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain (${{ matrix.toolchain }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Install native TLS dependencies
+        if: matrix.tls == 'native-tls'
+        run: sudo -n apt-get update && sudo -n apt-get install -y pkg-config libssl-dev
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Show Rust version
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Run tests
+        run: cargo test --locked --no-default-features --features "${{ matrix.tls }}" --lib --test mock
+
+      - name: Test documentation
+        run: cargo test --locked --no-default-features --features "${{ matrix.tls }}" --doc
+
+      - name: Verify package can be built
+        if: matrix.toolchain == 'stable' && matrix.tls == 'rustls'
+        run: cargo package --locked
