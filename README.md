@@ -25,12 +25,11 @@ aliyunpan = "1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-The default TLS backend is `rustls`. To use the operating system's TLS implementation
-(on Linux this needs OpenSSL headers and `pkg-config`):
-
 ```toml
 aliyunpan = { version = "1.0", default-features = false, features = ["native-tls"] }
 ```
+
+For more information, see the [documentation](https://docs.rs/aliyunpan), and the [examples](https://github.com/mingcheng/aliyunpan/tree/main/examples).
 
 ## Quick Start
 

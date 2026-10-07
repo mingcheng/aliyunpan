@@ -258,4 +258,13 @@ mod tests {
         assert_eq!(c.token_type, "Bearer");
         assert!(c.device_id.is_empty());
     }
+
+    #[test]
+    fn example_credentials_file_is_valid() {
+        let c: Credentials = serde_json::from_str(include_str!("../credentials.example.json")).unwrap();
+        assert!(!c.refresh_token.is_empty());
+        assert_eq!(c.token_type, "Bearer");
+        assert!(c.device_id.is_empty(), "the SDK must generate a unique device ID");
+        assert!(c.is_expired(Duration::ZERO));
+    }
 }
