@@ -30,6 +30,7 @@ async fn share_creation_rejects_success_shaped_notices_without_leaking_values() 
         auth.handle(req).unwrap_or_else(|| {
             Response::json(json!({
                 "message": "Please upgrade to continue; private-account-info",
+                "error": "Private error text must remain redacted",
                 "data": {"share_url": "https://private-link.invalid/secret"},
                 "private-field-name": "secret-value"
             }))
@@ -58,12 +59,14 @@ async fn share_creation_rejects_success_shaped_notices_without_leaking_values() 
         assert!(matches!(&error, Error::UnexpectedResponse { .. }));
         let text = format!("{error:?}");
         assert!(text.contains("notice=upgrade_required"));
+        assert!(text.contains("error=string"));
         assert!(text.contains("data.share_url=string"));
         for secret in [
             "private-account-info",
             "private-link",
             "secret-value",
             "private-field-name",
+            "Private error text",
         ] {
             assert!(!text.contains(secret));
         }

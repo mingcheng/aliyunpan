@@ -78,7 +78,13 @@ fn checked<T>(stage: &str, result: Result<T>) -> std::result::Result<T, String> 
         let detail = match error {
             Error::Api(e) => format!("API {:?}, HTTP {}", e.kind(), e.http_status),
             Error::Http { status, .. } | Error::RateLimited { status, .. } => format!("HTTP {status}"),
-            Error::Network(_) => "network failure".into(),
+            Error::Network(error) => format!(
+                "network failure (timeout={}, connect={}, body={}, decode={})",
+                error.is_timeout(),
+                error.is_connect(),
+                error.is_body(),
+                error.is_decode()
+            ),
             Error::Decode { .. } => "unexpected response schema".into(),
             Error::UnexpectedResponse { operation, shape } => format!("{operation}: {shape}"),
             Error::Io(e) => format!("credential storage/process failure ({:?})", e.kind()),

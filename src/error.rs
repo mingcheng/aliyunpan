@@ -226,30 +226,76 @@ pub(crate) fn unexpected_response(operation: &'static str, body: &Value) -> Erro
             Some(Value::Object(_)) => "object",
         }
     }
-    let mut fields = vec![format!("root={}", kind(Some(body)))];
-    for (prefix, object) in [("", Some(body)), ("data.", body.get("data"))] {
-        for key in [
-            "code",
-            "message",
-            "msg",
-            "success",
-            "result",
-            "data",
-            "share_id",
-            "share_url",
-            "shareId",
-            "shareUrl",
-        ] {
-            fields.push(format!("{prefix}{key}={}", kind(object.and_then(|v| v.get(key)))));
+    let keys = [
+        "code",
+        "message",
+        "msg",
+        "success",
+        "result",
+        "data",
+        "share_id",
+        "share_url",
+        "shareId",
+        "shareUrl",
+        "error",
+        "error_description",
+        "error_message",
+        "error_code",
+        "error_msg",
+        "errorCode",
+        "errorMessage",
+        "errCode",
+        "errMsg",
+        "description",
+        "display_message",
+        "reason",
+        "title",
+        "tips",
+    ];
+    let mut fields = vec![
+        format!("root={}", kind(Some(body))),
+        format!("share_id={}", kind(body.get("share_id"))),
+    ];
+    for (prefix, object) in [
+        ("", Some(body)),
+        ("data.", body.get("data")),
+        ("error.", body.get("error")),
+    ] {
+        for key in keys {
+            if let Some(value) = object.and_then(|v| v.get(key)) {
+                fields.push(format!("{prefix}{key}={}", kind(Some(value))));
+            }
+        }
+        if let Some(object) = object.and_then(Value::as_object) {
+            let unknown = object.keys().filter(|key| !keys.contains(&key.as_str())).count();
+            fields.push(format!("{prefix}unknown_fields={unknown}"));
         }
     }
-    let upgrade_notice = [Some(body), body.get("data")].into_iter().flatten().any(|object| {
-        ["message", "msg", "display_message"].into_iter().any(|key| {
-            object.get(key).and_then(Value::as_str).is_some_and(|message| {
-                message.contains("\u{5347}\u{7ea7}") || message.to_ascii_lowercase().contains("upgrade")
+    let upgrade_notice = [Some(body), body.get("data"), body.get("error")]
+        .into_iter()
+        .flatten()
+        .any(|object| {
+            [
+                "message",
+                "msg",
+                "display_message",
+                "error",
+                "error_description",
+                "error_message",
+                "error_msg",
+                "errorMessage",
+                "errMsg",
+                "description",
+                "reason",
+                "tips",
+            ]
+            .into_iter()
+            .any(|key| {
+                object.get(key).and_then(Value::as_str).is_some_and(|message| {
+                    message.contains("\u{5347}\u{7ea7}") || message.to_ascii_lowercase().contains("upgrade")
+                })
             })
-        })
-    });
+        });
     if upgrade_notice {
         fields.push("notice=upgrade_required".into());
     }
@@ -324,6 +370,20 @@ pub(crate) fn decode<R: DeserializeOwned>(body: &[u8]) -> Result<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexpected_response_classifies_notices_without_exposing_names_or_values() {
+        for body in [
+            serde_json::json!({"error": "\u{8bf7}\u{5347}\u{7ea7}", "private-name": "private-value"}),
+            serde_json::json!({"error": {"message": "Please upgrade; private-value"}}),
+        ] {
+            let text = unexpected_response("create_share_link", &body).to_string();
+            assert!(text.contains("notice=upgrade_required"));
+            assert!(text.contains("share_id=missing"));
+            assert!(!text.contains("private-name"));
+            assert!(!text.contains("private-value"));
+        }
+    }
 
     #[test]
     fn parses_api_error() {
