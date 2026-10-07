@@ -278,6 +278,14 @@ album-drive folder restrictions and video transcoding availability can differ
 between accounts. They remain visible as failures or blocked prerequisites rather
 than being mistaken for SDK compatibility.
 
+Share creation responses must contain a nonempty `share_id`; HTTP 200 notices
+without it return `Error::UnexpectedResponse` rather than an empty success object.
+The report includes only whitelisted field names/types and fixed notice hints
+(such as `upgrade_required`), never the notice text or link values. Session renewal
+may be rejected independently of ordinary signed operations; recreating a session
+is not treated as a successful renewal. For rapid uploads, `rapid_upload` takes
+precedence over a returned `upload_id`, since no pending upload session remains.
+
 The test body has a 15-minute budget and cleanup has an additional five minutes.
 Unexpected runner termination or an ambiguous mutation response can leave
 generated resources behind. The unique sandbox name is printed for manual

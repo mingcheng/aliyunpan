@@ -80,6 +80,7 @@ fn checked<T>(stage: &str, result: Result<T>) -> std::result::Result<T, String> 
             Error::Http { status, .. } | Error::RateLimited { status, .. } => format!("HTTP {status}"),
             Error::Network(_) => "network failure".into(),
             Error::Decode { .. } => "unexpected response schema".into(),
+            Error::UnexpectedResponse { operation, shape } => format!("{operation}: {shape}"),
             Error::Io(e) => format!("credential storage/process failure ({:?})", e.kind()),
             Error::NotLoggedIn => "missing refresh token".into(),
             Error::InvalidInput(_) => "invalid input or incomplete response".into(),

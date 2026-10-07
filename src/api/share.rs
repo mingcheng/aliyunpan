@@ -1,9 +1,10 @@
-use serde_json::json;
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 
 use super::{ids, set_marker};
 use crate::{
     client::{Client, Host},
-    error::Result,
+    error::{Error, Result, unexpected_response},
     models::{AnonymousShare, DriveFile, FastShare, ListOptions, Page, ShareLink, ShareToken, SharedFile},
 };
 
@@ -28,7 +29,8 @@ impl Client {
             "expiration": expiration.unwrap_or_default(),
             "file_id_list": ids(file_ids),
         });
-        self.post("/adrive/v2/share_link/create", &body).await
+        let value = self.post("/adrive/v2/share_link/create", &body).await?;
+        decode_created_share("create_share_link", value)
     }
 
     pub async fn list_share_links(&self, opts: &ListOptions) -> Result<Page<ShareLink>> {
@@ -139,8 +141,10 @@ impl Client {
 
     /// Create a quick-transfer link that expires after about 24 hours and cannot be canceled manually.
     pub async fn create_fast_share(&self, files: &[DriveFile]) -> Result<FastShare> {
-        self.post("/adrive/v1/share/create", &json!({ "drive_file_list": files }))
-            .await
+        let value = self
+            .post("/adrive/v1/share/create", &json!({ "drive_file_list": files }))
+            .await?;
+        decode_created_share("create_fast_share", value)
     }
 
     /// Create a quick transfer from a list of `(drive_id, file_id)` pairs.
@@ -151,6 +155,20 @@ impl Client {
             .collect();
         self.create_fast_share(&files).await
     }
+}
+
+pub(super) fn decode_created_share<T: DeserializeOwned>(operation: &'static str, value: Value) -> Result<T> {
+    if !value
+        .get("share_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err(unexpected_response(operation, &value));
+    }
+    serde_json::from_value(value.clone()).map_err(|source| Error::Decode {
+        source,
+        body: value.to_string(),
+    })
 }
 
 fn query_escape(s: &str) -> String {

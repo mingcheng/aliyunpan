@@ -133,6 +133,7 @@ impl Client {
             "share_pwd": share_pwd,
             "expiration": expiration.unwrap_or_default(),
         });
-        self.post("/adrive/v2/share_link/create", &body).await
+        let value = self.post("/adrive/v2/share_link/create", &body).await?;
+        super::share::decode_created_share("create_album_share", value)
     }
 }

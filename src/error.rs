@@ -123,6 +123,12 @@ pub enum Error {
         source: serde_json::Error,
         body: String,
     },
+    /// A decoded response lacks required success fields. `shape` contains only
+    /// whitelisted field names/types and fixed notice classifications, not values.
+    UnexpectedResponse {
+        operation: &'static str,
+        shape: String,
+    },
     Io(std::io::Error),
     Crypto(String),
     InvalidInput(String),
@@ -178,6 +184,9 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Self::Decode { source, body } => write!(f, "decode: {source}; body: {body}"),
+            Self::UnexpectedResponse { operation, shape } => {
+                write!(f, "unexpected {operation} response: {shape}")
+            }
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Crypto(m) => write!(f, "crypto: {m}"),
             Self::InvalidInput(m) => write!(f, "invalid input: {m}"),
@@ -200,6 +209,53 @@ impl std::error::Error for Error {
             Self::Io(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+pub(crate) fn unexpected_response(operation: &'static str, body: &Value) -> Error {
+    fn kind(value: Option<&Value>) -> &'static str {
+        match value {
+            None => "missing",
+            Some(Value::Null) => "null",
+            Some(Value::Bool(true)) => "true",
+            Some(Value::Bool(false)) => "false",
+            Some(Value::Number(_)) => "number",
+            Some(Value::String(s)) if s.is_empty() => "empty-string",
+            Some(Value::String(_)) => "string",
+            Some(Value::Array(_)) => "array",
+            Some(Value::Object(_)) => "object",
+        }
+    }
+    let mut fields = vec![format!("root={}", kind(Some(body)))];
+    for (prefix, object) in [("", Some(body)), ("data.", body.get("data"))] {
+        for key in [
+            "code",
+            "message",
+            "msg",
+            "success",
+            "result",
+            "data",
+            "share_id",
+            "share_url",
+            "shareId",
+            "shareUrl",
+        ] {
+            fields.push(format!("{prefix}{key}={}", kind(object.and_then(|v| v.get(key)))));
+        }
+    }
+    let upgrade_notice = [Some(body), body.get("data")].into_iter().flatten().any(|object| {
+        ["message", "msg", "display_message"].into_iter().any(|key| {
+            object.get(key).and_then(Value::as_str).is_some_and(|message| {
+                message.contains("\u{5347}\u{7ea7}") || message.to_ascii_lowercase().contains("upgrade")
+            })
+        })
+    });
+    if upgrade_notice {
+        fields.push("notice=upgrade_required".into());
+    }
+    Error::UnexpectedResponse {
+        operation,
+        shape: fields.join("; "),
     }
 }
 

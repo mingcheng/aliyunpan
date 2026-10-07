@@ -791,7 +791,28 @@ async fn multipart(client: &Client, report: &mut Report, root: &Sandbox) -> Resu
             Ok(response)
         })
         .await?;
-    if let Some(upload_id) = empty.upload_id.as_deref().filter(|id| !id.is_empty()) {
+    report.set(
+        "create_upload",
+        Status::Passed,
+        &format!(
+            "empty file: rapid_upload={}, upload_id_present={}",
+            empty.rapid_upload,
+            empty.upload_id.as_deref().is_some_and(|id| !id.is_empty())
+        ),
+    );
+    if empty.rapid_upload {
+        let file = client.get_file(drive, &empty.file_id).await?;
+        verify(
+            file.size == 0 && file.sha1_matches(&sha1(b"")),
+            "empty rapid upload metadata mismatch",
+        )?;
+        // A rapid response may retain an upload_id, but has no pending upload session.
+        report.set(
+            "complete_upload",
+            Status::Passed,
+            "completed by resume_upload; empty file completed by rapid upload",
+        );
+    } else if let Some(upload_id) = empty.upload_id.as_deref().filter(|id| !id.is_empty()) {
         report
             .case("complete_upload", async {
                 let urls = client.get_upload_url(drive, &empty.file_id, upload_id, &[1]).await?;
@@ -809,18 +830,6 @@ async fn multipart(client: &Client, report: &mut Report, root: &Sandbox) -> Resu
                 )
             })
             .await?;
-    } else if empty.rapid_upload {
-        let file = client.get_file(drive, &empty.file_id).await?;
-        verify(
-            file.size == 0 && file.sha1_matches(&sha1(b"")),
-            "empty rapid upload metadata mismatch",
-        )?;
-        // resume_upload above invokes this endpoint for its pending upload.
-        report.set(
-            "complete_upload",
-            Status::Passed,
-            "completed by resume_upload; content/hash verified",
-        );
     } else {
         return Err(Error::InvalidInput("empty upload lacks upload_id".into()));
     }

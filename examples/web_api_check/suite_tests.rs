@@ -257,6 +257,15 @@ async fn independent_account_cases_continue_after_rejection() {
 
 #[tokio::test]
 async fn multipart_exercises_resume_and_direct_empty_upload() {
+    exercise_multipart(false).await;
+}
+
+#[tokio::test]
+async fn rapid_empty_upload_with_upload_id_never_requests_a_pending_session() {
+    exercise_multipart(true).await;
+}
+
+async fn exercise_multipart(rapid_empty: bool) {
     let auth = Auth::default();
     let current = Mutex::new(json!({}));
     let server = MockServer::start(move |req| {
@@ -268,6 +277,7 @@ async fn multipart_exercises_resume_and_direct_empty_upload() {
                 *current.lock().unwrap() = req.json();
                 Response::json(json!({
                     "file_id": "uploaded", "upload_id": "upload-1",
+                    "rapid_upload": rapid_empty && req.json()["size"] == 0,
                     "part_info_list": [
                         {"part_number": 1, "upload_url": req.url("/put/1")},
                         {"part_number": 2, "upload_url": req.url("/put/2")}
@@ -275,6 +285,9 @@ async fn multipart_exercises_resume_and_direct_empty_upload() {
                 }))
             }
             "/v2/file/get_upload_url" => {
+                if rapid_empty && current.lock().unwrap()["size"] == 0 {
+                    return Response::error(404, "NotFound.UploadId");
+                }
                 let number = req.json()["part_info_list"][0]["part_number"].as_u64().unwrap();
                 Response::json(json!({
                     "part_info_list": [{"part_number": number, "upload_url": req.url(&format!("/put/{number}"))}]
@@ -284,8 +297,11 @@ async fn multipart_exercises_resume_and_direct_empty_upload() {
             "/v2/file/list_uploaded_parts" => Response::json(json!({
                 "uploaded_parts": [{"part_number": 1, "part_size": 524288}], "next_part_number_marker": ""
             })),
-            "/v2/file/complete" => {
+            "/v2/file/complete" | "/v2/file/get" => {
                 let source = current.lock().unwrap();
+                if req.path == "/v2/file/complete" && rapid_empty && source["size"] == 0 {
+                    return Response::error(404, "NotFound.UploadId");
+                }
                 Response::json(json!({
                     "file_id": "uploaded", "drive_id": common::DRIVE_ID, "type": "file",
                     "size": source["size"], "content_hash": source["content_hash"]
@@ -310,10 +326,12 @@ async fn multipart_exercises_resume_and_direct_empty_upload() {
     ] {
         assert_eq!(report.outcomes[name].status, Status::Passed, "{name}");
     }
-    assert_eq!(server.count("/put/1"), 2);
-    assert_eq!(server.find("/put/1")[1].body.len(), 0);
+    assert_eq!(server.count("/put/1"), if rapid_empty { 1 } else { 2 });
+    if !rapid_empty {
+        assert_eq!(server.find("/put/1")[1].body.len(), 0);
+    }
     assert_eq!(server.count("/put/2"), 1);
-    assert_eq!(server.count("/v2/file/complete"), 2);
+    assert_eq!(server.count("/v2/file/complete"), if rapid_empty { 1 } else { 2 });
 }
 
 #[test]

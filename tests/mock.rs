@@ -23,6 +23,106 @@ fn file_get_ok(req: &Request) -> Response {
     Response::json(file_json(&id, "a.bin", "file", "root"))
 }
 
+#[tokio::test]
+async fn share_creation_rejects_success_shaped_notices_without_leaking_values() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req).unwrap_or_else(|| {
+            Response::json(json!({
+                "message": "Please upgrade to continue; private-account-info",
+                "data": {"share_url": "https://private-link.invalid/secret"},
+                "private-field-name": "secret-value"
+            }))
+        })
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    let files = [aliyunpan::DriveFile::new(DRIVE_ID, "generated-file")];
+    let results = [
+        client
+            .create_share_link(DRIVE_ID, &["generated-file"], "abcd", None)
+            .await
+            .map(|_| ()),
+        client
+            .create_album_share("generated-album", "abcd", None)
+            .await
+            .map(|_| ()),
+        client.create_fast_share(&files).await.map(|_| ()),
+        client
+            .create_fast_share_from_ids(DRIVE_ID, &["generated-file"])
+            .await
+            .map(|_| ()),
+    ];
+    for result in results {
+        let error = result.unwrap_err();
+        assert!(matches!(&error, Error::UnexpectedResponse { .. }));
+        let text = format!("{error:?}");
+        assert!(text.contains("notice=upgrade_required"));
+        assert!(text.contains("data.share_url=string"));
+        for secret in [
+            "private-account-info",
+            "private-link",
+            "secret-value",
+            "private-field-name",
+        ] {
+            assert!(!text.contains(secret));
+        }
+    }
+}
+
+#[tokio::test]
+async fn share_creation_preserves_valid_response_fields() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req).unwrap_or_else(|| {
+            Response::json(json!({
+                "share_id": "test-share", "share_url": "https://example.invalid/s/test-share"
+            }))
+        })
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    assert_eq!(
+        client
+            .create_share_link(DRIVE_ID, &["file"], "abcd", None)
+            .await
+            .unwrap()
+            .share_id,
+        "test-share"
+    );
+    assert_eq!(
+        client.create_album_share("album", "abcd", None).await.unwrap().share_id,
+        "test-share"
+    );
+    assert_eq!(
+        client
+            .create_fast_share_from_ids(DRIVE_ID, &["file"])
+            .await
+            .unwrap()
+            .share_id,
+        "test-share"
+    );
+}
+
+#[tokio::test]
+async fn renewal_signature_rejection_is_not_hidden_by_session_recreation() {
+    let auth = Arc::new(Auth::default());
+    let handler = auth.clone();
+    let server = MockServer::start(move |req| {
+        handler
+            .handle(req)
+            .unwrap_or_else(|| Response::error(400, "DeviceSessionSignatureInvalid"))
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    assert_eq!(
+        client.renew_session().await.unwrap_err().api_kind(),
+        Some(ApiErrorKind::SignatureInvalid)
+    );
+    assert_eq!(server.count("/users/v1/users/device/renew_session"), 2);
+    assert_eq!(auth.sessions.load(Ordering::SeqCst), 2);
+}
+
 struct FailingStore {
     inner: MemoryStore,
     fail: AtomicBool,
