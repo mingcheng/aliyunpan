@@ -1370,6 +1370,345 @@ async fn cross_drive_requires_distinct_drives() {
 }
 
 #[tokio::test]
+async fn cross_drive_move_targets_backup_drive() {
+    let auth = Arc::new(Auth::default());
+    let a = auth.clone();
+    let server = MockServer::start(move |req| {
+        if let Some(resp) = a.handle(req) {
+            return resp;
+        }
+        if let Some(resp) = a.check(req) {
+            return resp;
+        }
+        assert_eq!(req.path, "/adrive/v2/file/crossDriveMove");
+        Response::json(json!({ "items": [
+            { "drive_id": DRIVE_ID, "file_id": "moved-1", "source_drive_id": "res", "source_file_id": "r1", "status": 201 },
+            { "drive_id": DRIVE_ID, "file_id": "", "source_drive_id": "res", "source_file_id": "r2", "status": 400 },
+        ] }))
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    assert!(matches!(
+        client.cross_drive_move("res", &["r1"], "res", "backup").await,
+        Err(Error::InvalidInput(_))
+    ));
+    assert_eq!(server.count("/adrive/v2/file/crossDriveMove"), 0);
+
+    let items = client
+        .cross_drive_move("res", &["r1", "r2"], DRIVE_ID, "backup")
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items[0].is_success());
+    assert_eq!(items[0].file_id, "moved-1");
+    assert!(!items[1].is_success(), "per-item failures must stay visible");
+
+    let body = server.find("/adrive/v2/file/crossDriveMove")[0].json();
+    assert_eq!(
+        body,
+        json!({
+            "from_drive_id": "res",
+            "from_file_ids": ["r1", "r2"],
+            "to_drive_id": DRIVE_ID,
+            "to_parent_fileId": "backup",
+        })
+    );
+    assert_eq!(server.count("/adrive/v2/file/crossDriveCopy"), 0);
+}
+
+#[tokio::test]
+async fn file_listing_path_and_rename_requests() {
+    let auth = Arc::new(Auth::default());
+    let a = auth.clone();
+    let server = MockServer::start(move |req| {
+        if let Some(resp) = a.handle(req) {
+            return resp;
+        }
+        if let Some(resp) = a.check(req) {
+            return resp;
+        }
+        let body = req.json();
+        match req.path.as_str() {
+            "/adrive/v3/file/list" => match body["marker"].as_str() {
+                None => Response::json(json!({
+                    "items": [file_json("f1", "a.bin", "file", "root")],
+                    "next_marker": "m2",
+                })),
+                Some("m2") => Response::json(json!({
+                    "items": [file_json("f2", "b.bin", "file", "root")],
+                    "next_marker": "",
+                })),
+                Some(other) => panic!("unexpected marker {other}"),
+            },
+            "/adrive/v1/file/get_path" => Response::json(json!({ "items": [
+                file_json("f1", "a.bin", "file", "dir"),
+                file_json("dir", "backup", "folder", "root"),
+            ] })),
+            "/adrive/v3/file/update" => {
+                let mut item = file_json(body["file_id"].as_str().unwrap(), "", "file", "root");
+                item["name"] = body["name"].clone();
+                Response::json(item)
+            }
+            other => panic!("unexpected path {other}"),
+        }
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+
+    let opts = aliyunpan::ListOptions {
+        limit: 1,
+        ..Default::default()
+    };
+    let first = client.list_files(DRIVE_ID, "root", &opts).await.unwrap();
+    assert_eq!(first.items[0].file_id, "f1");
+    assert_eq!(first.next_marker, "m2");
+    let second = client
+        .list_files(DRIVE_ID, "root", &opts.clone().with_marker(first.next_marker))
+        .await
+        .unwrap();
+    assert_eq!(second.items[0].file_id, "f2");
+    assert!(second.next_marker.is_empty());
+    let lists = server.find("/adrive/v3/file/list");
+    assert_eq!(lists[0].json()["parent_file_id"], "root");
+    assert_eq!(lists[0].json()["limit"], 1);
+    assert_eq!(lists[0].json()["all"], false);
+    assert!(lists[0].json().get("marker").is_none(), "initial page must omit marker");
+    assert_eq!(lists[1].json()["marker"], "m2");
+
+    assert_eq!(
+        client
+            .find_child(DRIVE_ID, "root", "b.bin")
+            .await
+            .unwrap()
+            .unwrap()
+            .file_id,
+        "f2",
+        "find_child must follow pagination"
+    );
+    assert!(client.find_child(DRIVE_ID, "root", "missing").await.unwrap().is_none());
+
+    let ancestry: Vec<String> = client
+        .get_path(DRIVE_ID, "f1")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.file_id)
+        .collect();
+    assert_eq!(ancestry, ["f1", "dir"]);
+    assert_eq!(
+        server.find("/adrive/v1/file/get_path")[0].json(),
+        json!({ "drive_id": DRIVE_ID, "file_id": "f1" })
+    );
+
+    let renamed = client
+        .rename(DRIVE_ID, "f1", "a-2026.bin", CheckNameMode::Refuse)
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "a-2026.bin");
+    assert_eq!(
+        server.find("/adrive/v3/file/update")[0].json(),
+        json!({ "drive_id": DRIVE_ID, "file_id": "f1", "name": "a-2026.bin", "check_name_mode": "refuse" })
+    );
+    assert!(matches!(
+        client.rename(DRIVE_ID, "f1", "bad/name", CheckNameMode::Refuse).await,
+        Err(Error::InvalidInput(_))
+    ));
+    assert_eq!(server.count("/adrive/v3/file/update"), 1);
+}
+
+#[tokio::test]
+async fn low_level_upload_requests() {
+    let auth = Arc::new(Auth::default());
+    let a = auth.clone();
+    let server = MockServer::start(move |req| {
+        if let Some(resp) = a.handle(req) {
+            return resp;
+        }
+        if let Some(resp) = a.check(req) {
+            return resp;
+        }
+        match req.path.as_str() {
+            "/adrive/v2/file/createWithFolders" => Response::json(json!({
+                "drive_id": DRIVE_ID,
+                "file_id": "up-1",
+                "parent_file_id": "root",
+                "file_name": "data.bin",
+                "type": "file",
+                "upload_id": "u-1",
+                "rapid_upload": false,
+                "part_info_list": [
+                    { "part_number": 1, "upload_url": req.url("/part/1") },
+                    { "part_number": 2, "upload_url": req.url("/part/2") },
+                ],
+            })),
+            "/v2/file/get_upload_url" => Response::json(json!({
+                "drive_id": DRIVE_ID,
+                "file_id": "up-1",
+                "upload_id": "u-1",
+                "part_info_list": [{ "part_number": 2, "upload_url": req.url("/part/2?renewed") }],
+            })),
+            "/v2/file/list_uploaded_parts" => Response::json(json!({
+                "upload_id": "u-1",
+                "uploaded_parts": [{ "part_number": 1, "part_size": 4, "etag": "e1" }],
+                "next_part_number_marker": "",
+            })),
+            "/v2/file/complete" => Response::json(file_json("up-1", "data.bin", "file", "root")),
+            other => panic!("unexpected path {other}"),
+        }
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+
+    let created = client
+        .create_upload(&aliyunpan::CreateUpload {
+            drive_id: DRIVE_ID,
+            parent_file_id: "root",
+            name: "data.bin",
+            size: 8,
+            content_hash: "ABCDEF",
+            proof_code: "cHJvb2Y=",
+            check_name_mode: CheckNameMode::Overwrite,
+            part_count: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.upload_id.as_deref(), Some("u-1"));
+    let body = server.find("/adrive/v2/file/createWithFolders")[0].json();
+    assert_eq!(
+        body["part_info_list"],
+        json!([{ "part_number": 1 }, { "part_number": 2 }])
+    );
+    assert_eq!(body["content_hash"], "ABCDEF");
+    assert_eq!(body["content_hash_name"], "sha1");
+    assert_eq!(body["proof_code"], "cHJvb2Y=");
+    assert_eq!(body["proof_version"], "v1");
+    assert_eq!(body["check_name_mode"], "overwrite");
+    assert_eq!(body["size"], 8);
+
+    let invalid = aliyunpan::CreateUpload {
+        drive_id: DRIVE_ID,
+        parent_file_id: "root",
+        name: "bad?name",
+        size: 0,
+        content_hash: "",
+        proof_code: "",
+        check_name_mode: CheckNameMode::Refuse,
+        part_count: 1,
+    };
+    assert!(matches!(
+        client.create_upload(&invalid).await,
+        Err(Error::InvalidInput(_))
+    ));
+    let too_many = aliyunpan::CreateUpload {
+        name: "ok.bin",
+        part_count: 10_001,
+        ..invalid
+    };
+    assert!(matches!(
+        client.create_upload(&too_many).await,
+        Err(Error::InvalidInput(_))
+    ));
+    assert_eq!(server.count("/adrive/v2/file/createWithFolders"), 1);
+
+    let urls = client.get_upload_url(DRIVE_ID, "up-1", "u-1", &[2]).await.unwrap();
+    assert_eq!(urls.part_info_list[0].part_number, 2);
+    assert!(urls.part_info_list[0].upload_url.ends_with("/part/2?renewed"));
+    assert_eq!(
+        server.find("/v2/file/get_upload_url")[0].json(),
+        json!({ "drive_id": DRIVE_ID, "file_id": "up-1", "upload_id": "u-1", "part_info_list": [{ "part_number": 2 }] })
+    );
+
+    let parts = client.list_uploaded_parts(DRIVE_ID, "up-1", "u-1", None).await.unwrap();
+    assert_eq!(parts.uploaded_parts[0].part_number, 1);
+    assert_eq!(parts.uploaded_parts[0].part_size, 4);
+    client
+        .list_uploaded_parts(DRIVE_ID, "up-1", "u-1", Some(7))
+        .await
+        .unwrap();
+    let listed = server.find("/v2/file/list_uploaded_parts");
+    assert!(
+        listed[0].json().get("part_number_marker").is_none(),
+        "initial marker must be omitted"
+    );
+    assert_eq!(listed[1].json()["part_number_marker"], 7);
+
+    let done = client.complete_upload(DRIVE_ID, "up-1", "u-1").await.unwrap();
+    assert_eq!(done.file_id, "up-1");
+    assert_eq!(
+        server.find("/v2/file/complete")[0].json(),
+        json!({ "ignoreError": true, "drive_id": DRIVE_ID, "file_id": "up-1", "upload_id": "u-1" })
+    );
+}
+
+#[tokio::test]
+async fn download_url_and_video_preview_requests() {
+    let auth = Arc::new(Auth::default());
+    let a = auth.clone();
+    let server = MockServer::start(move |req| {
+        if let Some(resp) = a.handle(req) {
+            return resp;
+        }
+        if req.path == "/dl/f1" {
+            assert!(
+                req.header("authorization").is_none(),
+                "presigned URLs must not carry tokens"
+            );
+            return Response::bytes(200, b"data".to_vec());
+        }
+        if let Some(resp) = a.check(req) {
+            return resp;
+        }
+        match req.path.as_str() {
+            "/v2/file/get_download_url" => Response::json(json!({
+                "method": "GET",
+                "url": req.url("/dl/f1"),
+                "expiration": "2026-10-07T12:00:00.000Z",
+                "size": 4,
+            })),
+            "/v2/file/get_video_preview_play_info" => Response::json(json!({
+                "drive_id": DRIVE_ID,
+                "file_id": "v1",
+                "video_preview_play_info": {
+                    "category": "live_transcoding",
+                    "meta": { "duration": 2.0 },
+                    "live_transcoding_task_list": [
+                        { "template_id": "LD", "status": "finished", "url": "https://example.invalid/ld.m3u8" },
+                    ],
+                },
+            })),
+            other => panic!("unexpected path {other}"),
+        }
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+
+    let url = client.get_download_url(DRIVE_ID, "f1", 600).await.unwrap();
+    assert_eq!(url.size, 4);
+    assert_eq!(url.expiration.as_deref(), Some("2026-10-07T12:00:00.000Z"));
+    assert_eq!(
+        server.find("/v2/file/get_download_url")[0].json(),
+        json!({ "drive_id": DRIVE_ID, "file_id": "f1", "expire_sec": 600 })
+    );
+    let data = client
+        .open_download_url(&url.url, None)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(data, "data");
+
+    let info = client.get_video_preview_play_info(DRIVE_ID, "v1").await.unwrap();
+    let tasks = &info.video_preview_play_info.live_transcoding_task_list;
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status.as_deref(), Some("finished"));
+    assert_eq!(
+        server.find("/v2/file/get_video_preview_play_info")[0].json(),
+        json!({ "category": "live_transcoding", "drive_id": DRIVE_ID, "file_id": "v1", "template_id": "" })
+    );
+}
+
+#[tokio::test]
 async fn share_helpers_paginate_and_parse_id() {
     let auth = Arc::new(Auth::default());
     let a = auth.clone();
