@@ -196,7 +196,11 @@ async fn run() -> std::result::Result<(), String> {
     checked("credential persistence preflight", store.save(&credentials))?;
     let config = Config {
         max_retries: 2,
-        request_timeout: Duration::from_secs(30),
+        request_timeout: if full {
+            Config::default().request_timeout
+        } else {
+            Duration::from_secs(30)
+        },
         ..Config::default()
     };
     if full {

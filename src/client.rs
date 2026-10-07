@@ -379,7 +379,17 @@ impl Client {
         let cfg = &self.inner.config;
         let mut attempt = 0;
         loop {
-            let resp = build(&self.inner.http).send().await?;
+            // Only replay transfer GETs and PUTs of the same immutable part.
+            // JSON mutations use execute(), where timeouts must remain ambiguous.
+            let resp = match build(&self.inner.http).send().await {
+                Ok(resp) => resp,
+                Err(error) if attempt < cfg.max_retries && (error.is_timeout() || error.is_connect()) => {
+                    attempt += 1;
+                    tokio::time::sleep(backoff(cfg.retry_delay, attempt, None)).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let status = resp.status().as_u16();
             if (is_transient(status) || status == 509) && attempt < cfg.max_retries {
                 attempt += 1;

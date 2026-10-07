@@ -49,6 +49,7 @@ pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub delay: Duration,
 }
 
 impl Response {
@@ -61,6 +62,7 @@ impl Response {
             status,
             headers: vec![("content-type".into(), "application/json".into())],
             body: value.to_string().into_bytes(),
+            delay: Duration::ZERO,
         }
     }
 
@@ -73,11 +75,17 @@ impl Response {
             status,
             headers: Vec::new(),
             body,
+            delay: Duration::ZERO,
         }
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn delayed(mut self, delay: Duration) -> Self {
+        self.delay = delay;
         self
     }
 }
@@ -173,6 +181,7 @@ async fn read_request(sock: &mut TcpStream) -> Option<Request> {
 }
 
 async fn write_response(sock: &mut TcpStream, resp: Response) {
+    tokio::time::sleep(resp.delay).await;
     let mut head = format!(
         "HTTP/1.1 {} MOCK\r\ncontent-length: {}\r\nconnection: close\r\n",
         resp.status,

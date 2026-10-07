@@ -18,7 +18,8 @@ pub struct Config {
     pub model_name: String,
     /// Preferred chunk size, increased automatically to keep the part count at or below 10,000.
     pub chunk_size: u64,
-    /// Maximum retry count for 429 and 5xx responses.
+    /// Maximum retry count for transient HTTP responses and transfer connect/read timeouts
+    /// before response headers arrive. JSON mutations are not retried on transport errors.
     pub max_retries: u32,
     /// Retry `n` waits `retry_delay * n`; a server-provided Retry-After takes precedence.
     pub retry_delay: Duration,

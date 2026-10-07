@@ -24,6 +24,95 @@ fn file_get_ok(req: &Request) -> Response {
 }
 
 #[tokio::test]
+async fn transfer_timeouts_retry_identical_gets_and_part_puts() {
+    for upload in [false, true] {
+        let auth = Auth::default();
+        let attempts = AtomicUsize::new(0);
+        let server = MockServer::start(move |req| {
+            if let Some(response) = auth.handle(req) {
+                return response;
+            }
+            assert_eq!(req.path, "/transfer");
+            assert_eq!(req.method, if upload { "PUT" } else { "GET" });
+            if upload {
+                assert_eq!(req.body, b"immutable part");
+            }
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Response::bytes(200, b"content".to_vec()).delayed(Duration::from_millis(600))
+            } else if upload {
+                Response::bytes(409, Vec::new())
+            } else {
+                Response::bytes(200, b"content".to_vec())
+            }
+        })
+        .await;
+        let mut cfg = config(&server.url);
+        cfg.request_timeout = Duration::from_millis(200);
+        cfg.max_retries = 1;
+        let (client, _) = connect_with(cfg, &server).await;
+        let url = format!("{}/transfer", server.url);
+        if upload {
+            client
+                .upload_part(&url, aliyunpan::Bytes::from_static(b"immutable part"))
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(
+                client
+                    .open_download_url(&url, None)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap(),
+                "content"
+            );
+        }
+        assert_eq!(server.count("/transfer"), 2);
+    }
+}
+
+#[tokio::test]
+async fn transfer_timeouts_stop_at_retry_limit() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req)
+            .unwrap_or_else(|| Response::bytes(200, Vec::new()).delayed(Duration::from_millis(600)))
+    })
+    .await;
+    let mut cfg = config(&server.url);
+    cfg.request_timeout = Duration::from_millis(200);
+    cfg.max_retries = 1;
+    let (client, _) = connect_with(cfg, &server).await;
+    let error = client
+        .upload_part(&format!("{}/part", server.url), aliyunpan::Bytes::from_static(b"same"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Network(e) if e.is_timeout()));
+    assert_eq!(server.count("/part"), 2);
+}
+
+#[tokio::test]
+async fn json_mutation_timeouts_are_not_replayed() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req)
+            .unwrap_or_else(|| Response::json(json!({"file_id": "created"})).delayed(Duration::from_millis(600)))
+    })
+    .await;
+    let mut cfg = config(&server.url);
+    cfg.request_timeout = Duration::from_millis(200);
+    cfg.max_retries = 3;
+    let (client, _) = connect_with(cfg, &server).await;
+    let error = client
+        .create_folder(DRIVE_ID, "root", "test", CheckNameMode::Refuse)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Network(e) if e.is_timeout()));
+    assert_eq!(server.count("/adrive/v2/file/createWithFolders"), 1);
+}
+
+#[tokio::test]
 async fn share_creation_rejects_success_shaped_notices_without_leaking_values() {
     let auth = Auth::default();
     let server = MockServer::start(move |req| {

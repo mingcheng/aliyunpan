@@ -286,6 +286,12 @@ may be rejected independently of ordinary signed operations; recreating a sessio
 is not treated as a successful renewal. For rapid uploads, `rapid_upload` takes
 precedence over a returned `upload_id`, since no pending upload session remains.
 
+The full suite uses the SDK's 60-second request/read timeout rather than the
+30-second smoke-check timeout. Transfer GETs and PUTs retry connect/read timeouts
+before response headers, within `max_retries`, replaying the same immutable part.
+Timeouts after a download stream starts are still errors, and JSON mutations are
+not replayed on transport errors. Exhausting retries remains a failed test.
+
 The test body has a 15-minute budget and cleanup has an additional five minutes.
 Unexpected runner termination or an ambiguous mutation response can leave
 generated resources behind. The unique sandbox name is printed for manual
