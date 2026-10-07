@@ -36,7 +36,7 @@ For more information, see the [documentation](https://docs.rs/aliyunpan), and th
 Obtain a refresh token outside this SDK; there is no interactive login flow.
 Initialize the credential store once and never overwrite rotated tokens afterwards.
 
-```rust
+```rust,no_run
 use aliyunpan::{Client, Config, Credentials, FileStore, TokenStore, UploadOptions};
 
 #[tokio::main]
@@ -264,4 +264,4 @@ env ALIYUNPAN_WRITE_TEST=1 cargo test --test live -- --nocapture --test-threads=
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
+This project is licensed under the MIT License. See [LICENSE](./LICENSE) for the full text.

@@ -14,6 +14,7 @@ include = [
     "/Cargo.lock",
     "/README.md",
     "/LICENSE",
+    "/credentials.example.json",
 ]
 keywords = ["aliyunpan", "alipan", "aliyundrive", "cloud-storage", "sdk"]
 categories = ["api-bindings", "asynchronous"]
