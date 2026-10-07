@@ -1,4 +1,4 @@
-name: Web API Health Check
+name: Web API Contract Tests
 
 on:
   schedule:
@@ -19,7 +19,7 @@ jobs:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: aliyunpan-monitor
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -35,17 +35,30 @@ jobs:
       - name: Test API monitor without credentials
         run: cargo test --locked --example web_api_check
 
-      - name: Build read-only probe
+      - name: Build API test runner
         run: cargo build --locked --example web_api_check
 
-      - name: Check web API and persist every token rotation
+      - name: Generate synthetic image and video fixtures
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y ffmpeg
+          mkdir -p "$RUNNER_TEMP/aliyunpan-api-tests"
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=blue:s=128x128" \
+            -frames:v 1 -threads 1 "$RUNNER_TEMP/aliyunpan-api-tests/fixture.jpg"
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "color=c=blue:s=128x128:r=10" \
+            -t 2 -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
+            "$RUNNER_TEMP/aliyunpan-api-tests/fixture.mp4"
+
+      - name: Test isolated read/write APIs and persist every token rotation
         id: probe
-        timeout-minutes: 8
+        timeout-minutes: 25
         env:
           ALIYUNPAN_CREDENTIALS: ${{ secrets.ALIYUNPAN_CREDENTIALS }}
           GH_TOKEN: ${{ secrets.ALIYUNPAN_SECRET_WRITER }}
           GH_REPO: ${{ github.repository }}
-        run: target/debug/examples/web_api_check "$RUNNER_TEMP/aliyunpan-credentials.json"
+        run: |
+          target/debug/examples/web_api_check "$RUNNER_TEMP/aliyunpan-credentials.json" \
+            --full "$RUNNER_TEMP/aliyunpan-api-tests"
 
       - name: Retry checkpoint persistence after failure
         if: ${{ always() && (steps.probe.outcome == 'failure' || steps.probe.outcome == 'cancelled') }}
@@ -60,6 +73,26 @@ jobs:
             echo "::error::No credential checkpoint exists; inspect the failed probe step."
             exit 1
           fi
+
+      - name: Publish per-API test summary
+        if: ${{ always() && steps.probe.outcome != 'skipped' }}
+        run: |
+          if test -f "$RUNNER_TEMP/aliyunpan-api-tests/api-report.md"; then
+            cat "$RUNNER_TEMP/aliyunpan-api-tests/api-report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "API report unavailable: fixture generation, credentials, or runner initialization failed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload redacted API report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-api-report
+          path: |
+            ${{ runner.temp }}/aliyunpan-api-tests/api-report.json
+            ${{ runner.temp }}/aliyunpan-api-tests/api-report.md
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Remove credential checkpoint
         if: ${{ always() }}

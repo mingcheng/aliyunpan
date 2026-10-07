@@ -172,6 +172,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --lib --test mock
 cargo test --locked --example web_api_check
+cargo test --locked --example web_api_check
 cargo test --locked --doc
 cargo +1.85.0 test --locked --lib --test mock
 cargo doc --locked --no-deps
@@ -206,8 +207,124 @@ against an account without understanding these operations.
 
 CI checks formatting, Clippy, documentation, security advisories, and package
 builds. Tests run on Rust 1.85, stable, beta, and nightly; nightly failures are
-non-blocking. Stable also tests the `native-tls` backend. CI does not use real
-account credentials or run live tests.
+non-blocking. Stable also tests the `native-tls` backend. Project push/PR CI does
+not use real account credentials or run live tests. Live API contract tests run
+in the independent workflow described below; they do not gate project CI.
+
+### Daily live API contract tests
+
+[Web API Contract Tests](.github/workflows/web-api-check.yml) runs daily at
+**03:17 UTC / 11:17 Asia/Shanghai**, and supports manual dispatch on the default
+branch. This is a **read/write integration suite**, not just a health check.
+It runs the [monitor tests](examples/web_api_check/suite_tests.rs) without credentials
+first, generates a synthetic JPEG and a two-second MP4 using FFmpeg, then runs
+the [live suite](examples/web_api_check/suite.rs) with `--full`.
+
+The suite inventories all public SDK HTTP operations, plus their high-level
+helpers. An inventory test fails when a new public async API is added without
+being classified. Pure local helpers and credential/stream accessors are not
+separate endpoint tests. Operations sharing an endpoint still have distinct
+contract cases; `connect_shared` is exercised by `connect`, and upload completion
+is also exercised by the multipart resume test.
+
+| Area | Live operations and assertions |
+| --- | --- |
+| Authentication / account | Refresh and persist credentials, preserve device ID, create/recreate/renew session; user identity, space, insurance-box info, album drive, VIP info |
+| Files / paths | Create a unique folder, get metadata and ancestry, child/absolute-path lookup, recursive mkdir, page-marker traversal, list-all, recursive walk |
+| Upload | Random multipart upload, low-level create/URL/part/complete operations, list received parts, serialized checkpoint resume, empty file, rapid upload from disk |
+| Download | URL retrieval, streamed download, exact ranged bytes and HTTP 206, disk download; compare sizes, content and SHA1 |
+| Mutations / batch | Check every subresponse and expected count, move, rename, star/unstar and aliases; confirm resulting metadata |
+| Recycle bin | Trash a generated test file, list/list-all, restore, permanently delete that file, purge only the owned test directories; confirm disappearance |
+| Cross-drive | Copy backup-to-resource and move resource-to-backup; verify destination, content hash and source disappearance |
+| Sharing | Password-protected one-day share of synthetic text, anonymous metadata, token and URL-token helpers, list/list-all shared files, save into a test directory, cancel the test share |
+| Quick transfer | Both quick-transfer entry points, using synthetic text only; these links cannot be canceled through the SDK and expire after about 24 hours |
+| Albums | Create/get/update/delete a test album, add/list/list-all/remove the generated image, create and cancel a one-day test album share |
+| Video | Upload the generated MP4 and poll for a finished transcoding task with a playback URL, for up to 60 seconds |
+| Async tasks | Query, batch-query and wait for real task IDs returned by test moves/share saves; require task success |
+
+The suite never selects existing user files as upload/share/mutation fixtures.
+Root directories use `aliyunpan-sdk-check-<random-id>` and `Refuse` mode: an
+existing directory is not reused. Album fixtures are uploaded into a separate
+owned directory in the album drive to avoid copying unrelated files. Cleanup
+verifies the exact drive, file ID, name, parent and folder type before deleting
+a sandbox. Shares, album memberships, albums and detached trashed test files
+are also cleaned up. Cleanup failures fail the workflow.
+
+**Deliberate exclusions:** `clear_recycle_bin`, `clear_recycle_bin_and_wait` and
+`device_logout` are never executed. They affect unrelated data or could revoke
+the credentials needed for the next scheduled run. The insurance-box endpoint
+only reads configuration; the SDK has no insurance-box write methods.
+
+#### Results and capability restrictions
+
+Each run publishes a per-method table in the Actions job summary, plus
+`api-report.json` and `api-report.md` in a `web-api-report` artifact retained for
+14 days. These contain only method names, statuses and redacted diagnostics,
+not tokens, presigned URLs, share links, API response bodies or user file names.
+
+- **PASSED**: the case executed and its assertions passed.
+- **FAILED**: a request, response contract, content check or cleanup failed.
+  Permissions/membership restrictions are failures, not silently accepted.
+- **BLOCKED**: not verified because a prerequisite failed or is absent. For example,
+  an account without a distinct resource drive cannot test cross-drive operations;
+  a synchronous mutation produces no real task ID for async-task queries.
+- **EXCLUDED**: deliberately not executed under the safety policy above.
+
+Independent groups continue after a failure; dependent cases remain blocked.
+Any failed case/group makes the process exit nonzero, even if cleanup succeeds.
+A successful run means all **executed** cases passed, not that blocked or excluded
+APIs were validated. Share/album membership restrictions, saving one's own share,
+album-drive folder restrictions and video transcoding availability can differ
+between accounts. They remain visible as failures or blocked prerequisites rather
+than being mistaken for SDK compatibility.
+
+The test body has a 15-minute budget and cleanup has an additional five minutes.
+Unexpected runner termination or an ambiguous mutation response can leave
+generated resources behind. The unique sandbox name is printed for manual
+recovery; inspect only those test resources, never clear the entire recycle bin.
+Quick-transfer links expire naturally. If album membership unexpectedly copies a
+fixture outside its sandbox, the case fails and does not blindly delete that copy;
+inspect the generated fixture in the album drive manually.
+
+#### Credentials and running the workflow
+
+Use the **`aliyunpan-monitor` GitHub Environment**, restricted to the default
+branch, with these environment secrets:
+
+- `ALIYUNPAN_CREDENTIALS`: JSON credentials, including `refresh_token` and a stable
+  `device_id`. Seed once; do not overwrite it with an old local token.
+- `ALIYUNPAN_SECRET_WRITER`: a GitHub token with permission to update this
+  environment's secrets. Prefer a fine-grained token restricted to this repository
+  with **Environments: read and write**. The default Actions `GITHUB_TOKEN` cannot
+  perform these writes.
+
+The [runner](examples/web_api_check.rs) saves every rotated credential set
+immediately using `TokenStore`, an atomic local checkpoint and `gh secret set`,
+before subsequent API requests. Failed secret writes are retried, and a separate
+write-only recovery step runs after failure. The credential checkpoint is never
+uploaded in artifacts and is removed when the job finishes. GitHub and Aliyun
+cannot participate in one transaction: a crash or extended persistence outage
+after rotation can still require logging in again and reseeding the secret.
+
+All runs share a non-canceling concurrency group. Do not use these rotating
+credentials simultaneously in local clients or other workflows. Existing
+environment secrets work with the expanded suite without reinitialization.
+
+After deploying to the default branch:
+
+```sh
+gh workflow run web-api-check.yml --repo mingcheng/aliyunpan --ref main
+gh run list --repo mingcheng/aliyunpan --workflow web-api-check.yml --limit 5
+```
+
+The same runner without `--full` retains the limited read-only smoke check.
+`--persist-only` republishes a retained checkpoint without another Aliyun refresh.
+Neither mode accesses `.env` automatically. The older opt-in tests in
+`tests/live.rs` remain for local development and are not the scheduled suite.
+Enable GitHub Actions failure notifications; cron execution can be delayed and
+public repositories' schedules may be disabled after prolonged inactivity.
+
+### Releases
 
 1. Update the package version and lockfile, then run the checks above.
 2. Verify a clean working tree with `cargo package --locked`.

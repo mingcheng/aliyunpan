@@ -1,5 +1,8 @@
-//! Read-only API monitor with immediate GitHub Environment Secret persistence.
-//! Usage: web_api_check <credentials.json> [--persist-only]
+//! API monitor with immediate GitHub Environment Secret persistence.
+//! Usage: web_api_check <credentials.json> [--persist-only | --full <fixture-directory>]
+
+#[path = "web_api_check/suite.rs"]
+mod suite;
 
 use std::{
     fs::File,
@@ -151,8 +154,10 @@ fn required_env(name: &str) -> std::result::Result<String, String> {
 
 async fn run() -> std::result::Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || args.len() > 2 || (args.len() == 2 && args[1] != "--persist-only") {
-        return Err("usage: web_api_check <credentials.json> [--persist-only]".into());
+    let full = args.len() == 3 && args[1] == "--full";
+    let persist_only = args.len() == 2 && args[1] == "--persist-only";
+    if args.len() != 1 && !full && !persist_only {
+        return Err("usage: web_api_check <credentials.json> [--persist-only | --full <fixture-directory>]".into());
     }
     required_env("GH_TOKEN")?;
     let store = GitHubStore {
@@ -160,7 +165,7 @@ async fn run() -> std::result::Result<(), String> {
         repository: required_env("GH_REPO")?,
         gh: "gh".into(),
     };
-    if args.len() == 2 {
+    if persist_only {
         let credentials = checked("load checkpoint", store.file.load())?
             .ok_or_else(|| "credential checkpoint not found".to_owned())?;
         if credentials.refresh_token.trim().is_empty() || credentials.device_id.trim().is_empty() {
@@ -169,18 +174,29 @@ async fn run() -> std::result::Result<(), String> {
         return checked("recover GitHub credential persistence", store.publish());
     }
 
+    if full {
+        for file in ["fixture.jpg", "fixture.mp4"] {
+            let path = std::path::Path::new(&args[2]).join(file);
+            if !path.is_file() {
+                return Err(format!(
+                    "full API tests require a generated {file} in the fixture directory"
+                ));
+            }
+        }
+    }
     let credentials = initial_credentials(&required_env(SECRET)?)?;
     // Verify write access before consuming a rotating token, and persist a new device ID.
     checked("credential persistence preflight", store.save(&credentials))?;
-    probe(
-        Config {
-            max_retries: 2,
-            request_timeout: Duration::from_secs(30),
-            ..Config::default()
-        },
-        store,
-    )
-    .await
+    let config = Config {
+        max_retries: 2,
+        request_timeout: Duration::from_secs(30),
+        ..Config::default()
+    };
+    if full {
+        suite::run(config, store, std::path::Path::new(&args[2])).await
+    } else {
+        probe(config, store).await
+    }
 }
 
 #[tokio::main]
