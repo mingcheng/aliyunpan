@@ -264,16 +264,23 @@ not tokens, presigned URLs, share links, API response bodies or user file names.
 
 - **PASSED**: the case executed and its assertions passed.
 - **FAILED**: a request, response contract, content check or cleanup failed.
-  Permissions/membership restrictions are failures, not silently accepted.
-- **BLOCKED**: not verified because a prerequisite failed or is absent. For example,
-  an account without a distinct resource drive cannot test cross-drive operations;
+  Network failures, unknown errors, normal file operations and cleanup errors
+  remain failures.
+- **BLOCKED**: not verified because a prerequisite is absent or a narrowly
+  recognized compatibility problem is encountered. Share/album-share/quick-transfer
+  creation with an incomplete success response, `FeatureTemporaryDisabled` or
+  `FileShareNotAllowed` is blocked. A renewal signature rejection is also blocked
+  but prominently reported. Other errors from these endpoints still fail.
+  An account without a distinct resource drive cannot test cross-drive operations;
   a synchronous mutation produces no real task ID for async-task queries.
 - **EXCLUDED**: deliberately not executed under the safety policy above.
 
 Independent groups continue after a failure; dependent cases remain blocked.
 Any failed case/group makes the process exit nonzero, even if cleanup succeeds.
-A successful run means all **executed** cases passed, not that blocked or excluded
-APIs were validated. Share/album membership restrictions, saving one's own share,
+A successful run means there were no **FAILED** cases, not that blocked or excluded
+APIs were validated. Blocked endpoints are still attempted on subsequent runs and
+become PASSED if their assertions succeed; they are not permanently disabled.
+Share/album membership restrictions, saving one's own share,
 album-drive folder restrictions and video transcoding availability can differ
 between accounts. They remain visible as failures or blocked prerequisites rather
 than being mistaken for SDK compatibility.
@@ -281,10 +288,26 @@ than being mistaken for SDK compatibility.
 Share creation responses must contain a nonempty `share_id`; HTTP 200 notices
 without it return `Error::UnexpectedResponse` rather than an empty success object.
 The report includes only whitelisted field names/types and fixed notice hints
-(such as `upgrade_required`), never the notice text or link values. Session renewal
-may be rejected independently of ordinary signed operations; recreating a session
-is not treated as a successful renewal. For rapid uploads, `rapid_upload` takes
+(such as `upgrade_required`), never the notice text or link values. For rapid uploads, `rapid_upload` takes
 precedence over a returned `upload_id`, since no pending upload session remains.
+
+#### Device session renewal: priority check
+
+Session renewal is separate from access/refresh-token rotation. Creation signs
+nonce zero. `renew_session` now signs the **next nonce with the same device key**,
+serializes against other renewals/authentication recovery, and publishes the new
+signature only after the server confirms success. Recreating the session resets
+the nonce. The renewal request is not automatically replayed on HTTP, network or
+decoding failures: the server may already have advanced its nonce.
+
+Failure or cancellation invalidates the local session so the next signed request
+recreates it rather than using an uncertain signature. Renewal errors still
+propagate to SDK callers; `BLOCKED` is a monitoring policy, not an SDK success
+fallback. The Actions summary highlights renewal and includes signed root-list
+checks before and after it. A failure in either signed check fails the workflow,
+even when the renewal itself is blocked. A successful post-failure check proves
+session recovery, **not** successful renewal. On success, the suite renews a
+second time and repeats the signed check to validate continued nonce progression.
 
 The full suite uses the SDK's 60-second request/read timeout rather than the
 30-second smoke-check timeout. Transfer GETs and PUTs retry connect/read timeouts

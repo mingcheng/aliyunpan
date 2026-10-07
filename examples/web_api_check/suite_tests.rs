@@ -233,7 +233,9 @@ async fn independent_account_cases_continue_after_rejection() {
             "/adrive/v1/user/albums_info" => Response::json(json!({"data": {"driveId": "album-drive"}})),
             "/business/v1.0/users/vip/info" => Response::json(json!({"identity": "member"})),
             "/users/v1/users/device/renew_session" => Response::json(json!({"result": true, "success": true})),
-            "/adrive/v3/share_link/list" | "/adrive/v1/album/list" => Response::json(json!({"items": []})),
+            "/adrive/v3/share_link/list" | "/adrive/v1/album/list" | "/adrive/v3/file/list" => {
+                Response::json(json!({"items": []}))
+            }
             _ => Response::error(404, "UnexpectedRequest"),
         }
     })
@@ -252,6 +254,87 @@ async fn independent_account_cases_continue_after_rejection() {
         "list_all_albums",
     ] {
         assert_eq!(report.outcomes[case].status, Status::Passed, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn known_sharing_blockers_do_not_fail_their_parent_group() {
+    let mut report = Report::new();
+    let error = Error::UnexpectedResponse {
+        operation: "create_share_link",
+        shape: "root=object; share_id=missing; unknown_fields=2".into(),
+    };
+    let result: Result<()> = report.case("create_share_link", async { Err(error) }).await;
+    report.group("group/shares", result);
+    assert_eq!(report.outcomes["create_share_link"].status, Status::Blocked);
+    assert_eq!(report.outcomes["group/shares"].status, Status::Blocked);
+    assert!(!report.failed());
+    report.case("create_share_link", async { Ok(()) }).await.unwrap();
+    assert_eq!(report.outcomes["create_share_link"].status, Status::Passed);
+}
+
+#[tokio::test]
+async fn blocker_policy_does_not_hide_transport_unknown_or_cleanup_errors() {
+    for name in ["create_share_link", "renew_session", "cancel_share_links", "purge"] {
+        let mut report = Report::new();
+        let result: Result<()> = report
+            .case(name, async {
+                Err(Error::Http {
+                    status: 500,
+                    body: "private".into(),
+                })
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(report.outcomes[name].status, Status::Failed);
+        assert!(report.failed());
+    }
+    let mut report = Report::new();
+    let error = Error::UnexpectedResponse {
+        operation: "create_share_link",
+        shape: "share_id=missing".into(),
+    };
+    let result: Result<()> = report.case("cancel_share_links", async { Err(error) }).await;
+    report.group("cleanup/shares", result);
+    assert_eq!(report.outcomes["cleanup/shares"].status, Status::Failed);
+}
+
+#[tokio::test]
+async fn renewal_signature_blocker_requires_successful_post_recovery_check() {
+    for healthy_after in [true, false] {
+        let auth = Arc::new(Auth::default());
+        let handler = auth.clone();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let server = MockServer::start(move |req| {
+            if let Some(response) = handler.handle(req) {
+                return response;
+            }
+            if req.path == "/users/v1/users/device/renew_session" {
+                return Response::error(400, "DeviceSessionSignatureInvalid");
+            }
+            if req.path == "/adrive/v3/file/list" {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 && !healthy_after {
+                    return Response::error(403, "PermissionDenied");
+                }
+                return handler
+                    .check(req)
+                    .unwrap_or_else(|| Response::json(json!({"items": []})));
+            }
+            Response::error(404, "UnexpectedRequest")
+        })
+        .await;
+        let (client, _) = common::connect(&server).await;
+        let mut report = Report::new();
+        session_renewal(&client, &mut report).await;
+        assert_eq!(report.outcomes["renew_session"].status, Status::Blocked);
+        assert_eq!(report.outcomes["session/before-renew"].status, Status::Passed);
+        assert_eq!(
+            report.outcomes["session/after-renew"].status,
+            if healthy_after { Status::Passed } else { Status::Failed }
+        );
+        assert_eq!(report.failed(), !healthy_after);
+        assert_eq!(auth.sessions.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(server.count("/users/v1/users/device/renew_session"), 1);
     }
 }
 

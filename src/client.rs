@@ -42,6 +42,7 @@ struct State {
     pending_save: bool,
     key: Option<DeviceKey>,
     signature: String,
+    nonce: u64,
     epoch: u64,
 }
 
@@ -109,6 +110,7 @@ impl Client {
                     pending_save: false,
                     key: None,
                     signature: String::new(),
+                    nonce: 0,
                     epoch: 0,
                 }),
                 recover: Mutex::new(()),
@@ -154,6 +156,61 @@ impl Client {
     pub async fn recreate_session(&self) -> Result<()> {
         let _guard = self.inner.recover.lock().await;
         self.create_session_locked().await
+    }
+
+    /// Renew using the current device key and the next nonce, publishing the new
+    /// signature only on success. Failure invalidates the local session; the next
+    /// signed request recreates it rather than replaying an ambiguous renewal.
+    pub async fn renew_session(&self) -> Result<()> {
+        let _guard = self.inner.recover.lock().await;
+        self.save_pending_locked().await?;
+        if self
+            .inner
+            .state
+            .read()
+            .await
+            .creds
+            .is_expired(self.inner.config.token_refresh_margin)
+        {
+            self.refresh_locked().await?;
+        }
+        if self.inner.state.read().await.key.is_none() {
+            self.create_session_locked().await?;
+        }
+        let cfg = &self.inner.config;
+        let mut state = self.inner.state.write().await;
+        let nonce = state
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| Error::Crypto("session nonce exhausted".into()))?;
+        let key = state
+            .key
+            .take()
+            .ok_or_else(|| Error::Crypto("session key unavailable".into()))?;
+        // Also protects cancellation: once a renewal is attempted, the old
+        // signature cannot safely be reused if the response is lost.
+        state.signature.clear();
+        state.epoch += 1;
+        let signature = key.sign(&cfg.app_id, &state.creds.device_id, &state.creds.user_id, nonce)?;
+        let headers = [
+            ("authorization", state.creds.authorization()),
+            ("x-device-id", state.creds.device_id.clone()),
+            ("x-signature", signature.clone()),
+        ];
+        let bytes = self
+            .execute_with_retries(
+                Host::Api,
+                "/users/v1/users/device/renew_session",
+                &to_payload(&json!({}))?,
+                &headers,
+                0,
+            )
+            .await?;
+        decode::<SessionResult>(&bytes)?.into_result()?;
+        state.key = Some(key);
+        state.signature = signature;
+        state.nonce = nonce;
+        Ok(())
     }
 
     async fn ensure_fresh(&self) -> Result<()> {
@@ -259,6 +316,7 @@ impl Client {
                     let mut s = self.inner.state.write().await;
                     s.key = Some(key);
                     s.signature = signature;
+                    s.nonce = 0;
                     s.epoch += 1;
                     return Ok(());
                 }
@@ -273,6 +331,18 @@ impl Client {
 
     /// Send a JSON POST without authentication recovery, retrying 429 and 5xx responses with backoff.
     async fn execute(&self, host: Host, path: &str, body: &Bytes, headers: &[(&'static str, String)]) -> Result<Bytes> {
+        self.execute_with_retries(host, path, body, headers, self.inner.config.max_retries)
+            .await
+    }
+
+    async fn execute_with_retries(
+        &self,
+        host: Host,
+        path: &str,
+        body: &Bytes,
+        headers: &[(&'static str, String)],
+        max_retries: u32,
+    ) -> Result<Bytes> {
         let cfg = &self.inner.config;
         let base = match host {
             Host::Auth => &cfg.auth_url,
@@ -300,7 +370,7 @@ impl Client {
             let status = resp.status().as_u16();
             let retry_after = retry_after(&resp);
             let bytes = resp.bytes().await?;
-            if is_transient(status) && attempt < cfg.max_retries {
+            if is_transient(status) && attempt < max_retries {
                 attempt += 1;
                 tokio::time::sleep(backoff(cfg.retry_delay, attempt, retry_after)).await;
                 continue;

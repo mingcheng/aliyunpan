@@ -201,9 +201,13 @@ async fn renewal_signature_rejection_is_not_hidden_by_session_recreation() {
     let auth = Arc::new(Auth::default());
     let handler = auth.clone();
     let server = MockServer::start(move |req| {
-        handler
-            .handle(req)
-            .unwrap_or_else(|| Response::error(400, "DeviceSessionSignatureInvalid"))
+        if let Some(response) = handler.handle(req) {
+            return response;
+        }
+        if req.path == "/users/v1/users/device/renew_session" {
+            return Response::error(400, "DeviceSessionSignatureInvalid");
+        }
+        handler.check(req).unwrap_or_else(|| file_get_ok(req))
     })
     .await;
     let (client, _) = connect(&server).await;
@@ -211,8 +215,133 @@ async fn renewal_signature_rejection_is_not_hidden_by_session_recreation() {
         client.renew_session().await.unwrap_err().api_kind(),
         Some(ApiErrorKind::SignatureInvalid)
     );
-    assert_eq!(server.count("/users/v1/users/device/renew_session"), 2);
+    assert_eq!(server.count("/users/v1/users/device/renew_session"), 1);
+    assert_eq!(auth.sessions.load(Ordering::SeqCst), 1);
+    client.get_file(DRIVE_ID, "test-file").await.unwrap();
     assert_eq!(auth.sessions.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn renewal_signs_next_nonce_and_publishes_it_to_concurrent_clones() {
+    use k256::{
+        ecdsa::{Signature, VerifyingKey, signature::hazmat::PrehashVerifier},
+        sha2::{Digest, Sha256},
+    };
+
+    fn unhex(value: &str) -> Vec<u8> {
+        (0..value.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&value[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    let auth = Auth::default();
+    let session = Mutex::new((None::<VerifyingKey>, 0u64));
+    let server = MockServer::start(move |req| {
+        if req.path == "/users/v1/users/device/create_session" {
+            let public = req.json()["pubKey"].as_str().unwrap().to_owned();
+            *session.lock().unwrap() = (Some(VerifyingKey::from_sec1_bytes(&unhex(&public[2..])).unwrap()), 0);
+        }
+        if let Some(response) = auth.handle(req) {
+            return response;
+        }
+        assert_eq!(req.header("authorization"), Some(auth.token().as_str()));
+        assert_eq!(req.header("x-device-id"), Some(DEVICE_ID));
+        let mut state = session.lock().unwrap();
+        let renewing = req.path == "/users/v1/users/device/renew_session";
+        let nonce = state.1 + u64::from(renewing);
+        let digest = Sha256::digest(format!("{}:{DEVICE_ID}:{USER_ID}:{nonce}", Config::default().app_id).as_bytes());
+        let signature = req.header("x-signature").unwrap();
+        state
+            .0
+            .as_ref()
+            .unwrap()
+            .verify_prehash(&digest, &Signature::from_slice(&unhex(&signature[..128])).unwrap())
+            .unwrap();
+        if renewing {
+            assert_eq!(req.json(), json!({}));
+            state.1 = nonce;
+            Response::json(json!({"result": true, "success": true}))
+        } else {
+            file_get_ok(req)
+        }
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    client.renew_session().await.unwrap();
+    client.get_file(DRIVE_ID, "test-file").await.unwrap();
+    let clone = client.clone();
+    let (first, second) = tokio::join!(client.renew_session(), clone.renew_session());
+    first.unwrap();
+    second.unwrap();
+    clone.get_file(DRIVE_ID, "test-file").await.unwrap();
+    assert_eq!(server.count("/users/v1/users/device/create_session"), 1);
+    client.recreate_session().await.unwrap();
+    client.renew_session().await.unwrap();
+    client.get_file(DRIVE_ID, "test-file").await.unwrap();
+    assert_eq!(server.count("/users/v1/users/device/create_session"), 2);
+    assert_eq!(server.count("/users/v1/users/device/renew_session"), 4);
+}
+
+#[tokio::test]
+async fn ambiguous_renewal_errors_do_not_replay_or_publish_the_candidate_signature() {
+    for response in [
+        Response::error(503, "Unavailable"),
+        Response::json(json!({"result": false, "success": true})),
+        Response::bytes(200, b"invalid-json".to_vec()),
+        Response::json(json!({"result": true, "success": true})).delayed(Duration::from_millis(600)),
+    ] {
+        let auth = Arc::new(Auth::default());
+        let handler = auth.clone();
+        let server = MockServer::start(move |req| {
+            if let Some(response) = handler.handle(req) {
+                return response;
+            }
+            if req.path == "/users/v1/users/device/renew_session" {
+                return response.clone();
+            }
+            handler.check(req).unwrap_or_else(|| file_get_ok(req))
+        })
+        .await;
+        let mut cfg = config(&server.url);
+        cfg.request_timeout = Duration::from_millis(200);
+        let (client, _) = connect_with(cfg, &server).await;
+        assert!(client.renew_session().await.is_err());
+        assert_eq!(server.count("/users/v1/users/device/renew_session"), 1);
+        assert_eq!(auth.sessions.load(Ordering::SeqCst), 1);
+        client.get_file(DRIVE_ID, "test-file").await.unwrap();
+        assert_eq!(auth.sessions.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn canceled_renewal_invalidates_session_before_releasing_locks() {
+    let auth = Arc::new(Auth::default());
+    let handler = auth.clone();
+    let received = Arc::new(tokio::sync::Notify::new());
+    let notify = received.clone();
+    let server = MockServer::start(move |req| {
+        if let Some(response) = handler.handle(req) {
+            return response;
+        }
+        if req.path == "/users/v1/users/device/renew_session" {
+            notify.notify_one();
+            return Response::json(json!({"result": true, "success": true})).delayed(Duration::from_secs(1));
+        }
+        handler.check(req).unwrap_or_else(|| file_get_ok(req))
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    let clone = client.clone();
+    let task = tokio::spawn(async move { clone.renew_session().await });
+    tokio::time::timeout(Duration::from_secs(2), received.notified())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    client.get_file(DRIVE_ID, "test-file").await.unwrap();
+    assert_eq!(auth.sessions.load(Ordering::SeqCst), 2);
+    assert_eq!(server.count("/users/v1/users/device/renew_session"), 1);
 }
 
 struct FailingStore {

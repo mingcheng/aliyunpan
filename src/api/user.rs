@@ -2,7 +2,7 @@ use serde::de::IgnoredAny;
 use serde_json::json;
 
 use crate::{
-    client::{Client, Host, SessionResult},
+    client::{Client, Host},
     error::Result,
     models::{AlbumsInfo, PersonalInfo, SboxInfo, UserInfo, VipInfo},
 };
@@ -29,13 +29,6 @@ impl Client {
     pub async fn get_vip_info(&self) -> Result<VipInfo> {
         self.post_unsigned(Host::Api, "/business/v1.0/users/vip/info", &json!({}))
             .await
-    }
-
-    /// Renew the device session; not verified against the live API.
-    pub async fn renew_session(&self) -> Result<()> {
-        self.post::<SessionResult>("/users/v1/users/device/renew_session", &json!({}))
-            .await?
-            .into_result()
     }
 
     /// Revoke the current device session, potentially invalidating the refresh token. Untested; use with care.

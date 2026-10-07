@@ -73,27 +73,29 @@ impl TokenStore for GitHubStore {
 }
 
 fn checked<T>(stage: &str, result: Result<T>) -> std::result::Result<T, String> {
-    result.map_err(|error| {
-        // Raw API/HTTP/decode errors can contain credentials or private account data.
-        let detail = match error {
-            Error::Api(e) => format!("API {:?}, HTTP {}", e.kind(), e.http_status),
-            Error::Http { status, .. } | Error::RateLimited { status, .. } => format!("HTTP {status}"),
-            Error::Network(error) => format!(
-                "network failure (timeout={}, connect={}, body={}, decode={})",
-                error.is_timeout(),
-                error.is_connect(),
-                error.is_body(),
-                error.is_decode()
-            ),
-            Error::Decode { .. } => "unexpected response schema".into(),
-            Error::UnexpectedResponse { operation, shape } => format!("{operation}: {shape}"),
-            Error::Io(e) => format!("credential storage/process failure ({:?})", e.kind()),
-            Error::NotLoggedIn => "missing refresh token".into(),
-            Error::InvalidInput(_) => "invalid input or incomplete response".into(),
-            _ => "SDK failure".into(),
-        };
-        format!("{stage}: {detail}")
-    })
+    result.map_err(|error| describe_error(stage, &error))
+}
+
+fn describe_error(stage: &str, error: &Error) -> String {
+    // Raw API/HTTP/decode errors can contain credentials or private account data.
+    let detail = match error {
+        Error::Api(e) => format!("API {:?}, HTTP {}", e.kind(), e.http_status),
+        Error::Http { status, .. } | Error::RateLimited { status, .. } => format!("HTTP {status}"),
+        Error::Network(error) => format!(
+            "network failure (timeout={}, connect={}, body={}, decode={})",
+            error.is_timeout(),
+            error.is_connect(),
+            error.is_body(),
+            error.is_decode()
+        ),
+        Error::Decode { .. } => "unexpected response schema".into(),
+        Error::UnexpectedResponse { operation, shape } => format!("{operation}: {shape}"),
+        Error::Io(e) => format!("credential storage/process failure ({:?})", e.kind()),
+        Error::NotLoggedIn => "missing refresh token".into(),
+        Error::InvalidInput(_) => "invalid input or incomplete response".into(),
+        _ => "SDK failure".into(),
+    };
+    format!("{stage}: {detail}")
 }
 
 fn initial_credentials(json: &str) -> std::result::Result<Credentials, String> {

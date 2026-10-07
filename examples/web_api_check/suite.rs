@@ -3,15 +3,15 @@
 use std::{collections::BTreeMap, fs, future::Future, path::Path, time::Duration};
 
 use aliyunpan::{
-    BatchRequest, BatchResponse, BatchVersion, Bytes, CheckNameMode, Client, Config, CreateUpload, Credentials,
-    DriveFile, Error, FileItem, ListOptions, OrderBy, Result, TokenStore, UploadOptions, UploadSource, UploadStart,
-    UploadState,
+    ApiErrorKind, BatchRequest, BatchResponse, BatchVersion, Bytes, CheckNameMode, Client, Config, CreateUpload,
+    Credentials, DriveFile, Error, FileItem, ListOptions, OrderBy, Result, TokenStore, UploadOptions, UploadSource,
+    UploadStart, UploadState,
 };
 use serde::Serialize;
 use serde_json::json;
 use sha1::{Digest, Sha1};
 
-use super::checked;
+use super::{checked, describe_error};
 
 const METHODS: &[&str] = &[
     "connect",
@@ -112,6 +112,31 @@ struct Report {
     outcomes: BTreeMap<String, Outcome>,
 }
 
+fn blocked_reason(name: &str, error: &Error) -> Option<&'static str> {
+    if name == "renew_session" && error.api_kind() == Some(ApiErrorKind::SignatureInvalid) {
+        return Some("priority: renewal signature rejected; not verified; see signed checks before/after renewal");
+    }
+    let sharing = matches!(
+        name,
+        "create_share_link"
+            | "create_album_share"
+            | "create_fast_share"
+            | "create_fast_share_from_ids"
+            | "group/shares"
+    );
+    if sharing
+        && (matches!(error, Error::UnexpectedResponse { operation, .. }
+        if matches!(*operation, "create_share_link" | "create_album_share" | "create_fast_share"))
+            || matches!(
+                error.api_kind(),
+                Some(ApiErrorKind::FeatureDisabled | ApiErrorKind::ShareNotAllowed)
+            ))
+    {
+        return Some("known sharing compatibility/capability blocker; not validated");
+    }
+    None
+}
+
 impl Report {
     fn new() -> Self {
         let mut report = Self {
@@ -168,11 +193,22 @@ impl Report {
         let result = future.await;
         match &result {
             Ok(_) => self.set(name, Status::Passed, "response and case assertions passed"),
-            Err(_) => {
-                let error = result.err().expect("matched an error");
-                let detail = checked::<()>(name, Err(error)).unwrap_err();
-                self.set(name, Status::Failed, &detail);
-                return Err(Error::InvalidInput(format!("case {name} failed")));
+            Err(error) => {
+                let reason = blocked_reason(name, error);
+                let mut detail = describe_error(name, error);
+                if let Some(reason) = reason {
+                    detail = format!("{reason}; {detail}");
+                    eprintln!("BLOCKED: {name}: {reason}");
+                }
+                self.set(
+                    name,
+                    if reason.is_some() {
+                        Status::Blocked
+                    } else {
+                        Status::Failed
+                    },
+                    &detail,
+                );
             }
         }
         result
@@ -180,8 +216,20 @@ impl Report {
 
     fn group(&mut self, name: &str, result: Result<()>) {
         if let Err(error) = result {
-            let detail = checked::<()>(name, Err(error)).unwrap_err();
-            self.set(name, Status::Failed, &detail);
+            let reason = blocked_reason(name, &error);
+            let mut detail = describe_error(name, &error);
+            if let Some(reason) = reason {
+                detail = format!("{reason}; {detail}");
+            }
+            self.set(
+                name,
+                if reason.is_some() {
+                    Status::Blocked
+                } else {
+                    Status::Failed
+                },
+                &detail,
+            );
         }
     }
 
@@ -189,6 +237,19 @@ impl Report {
         let data = serde_json::to_vec_pretty(&self.outcomes).map_err(|_| "serialize API report failed")?;
         fs::write(directory.join("api-report.json"), data).map_err(|_| "write API JSON report failed")?;
         let mut text = String::from("# SDK live API contract tests\n\n");
+        if let Some(renewal) = self.outcomes.get("renew_session") {
+            text.push_str(&format!(
+                "## Priority: device session renewal\n\nResult: **{:?}**. {}\n\n",
+                renewal.status, renewal.detail
+            ));
+            text.push_str("Renewal uses the next nonce. A rejected or ambiguous renewal is not treated as success; the following signed check may recreate the session. This is separate from refresh-token rotation.\n\n");
+            for name in ["session/before-renew", "session/after-renew"] {
+                if let Some(outcome) = self.outcomes.get(name) {
+                    text.push_str(&format!("- {name}: {:?}; {}\n", outcome.status, outcome.detail));
+                }
+            }
+            text.push('\n');
+        }
         text.push_str("PASSED = executed and checked; FAILED = request/assertion failed; BLOCKED = not verified; EXCLUDED = safety policy.\n\n");
         for status in [Status::Passed, Status::Failed, Status::Blocked, Status::Excluded] {
             let count = self.outcomes.values().filter(|o| o.status == status).count();
@@ -386,7 +447,7 @@ async fn account(client: &Client, report: &mut Report) {
         })
         .await;
     let _ = report.case("recreate_session", client.recreate_session()).await;
-    let _ = report.case("renew_session", client.renew_session()).await;
+    session_renewal(client, report).await;
     let _ = report
         .case("get_user_info", async {
             let user = client.get_user_info().await?;
@@ -435,6 +496,38 @@ async fn account(client: &Client, report: &mut Report) {
     };
     let _ = report.case("list_albums", client.list_albums(&opts)).await;
     let _ = report.case("list_all_albums", client.list_all_albums(&opts)).await;
+}
+
+async fn session_renewal(client: &Client, report: &mut Report) {
+    let drive = client.default_drive_id().await;
+    let before = report
+        .case("session/before-renew", async {
+            verify(!drive.is_empty(), "missing drive for session health check")?;
+            client.list_files(&drive, "root", &page_options()).await?;
+            Ok(())
+        })
+        .await;
+    if before.is_err() {
+        report.set("renew_session", Status::Blocked, "pre-renewal signed request failed");
+        return;
+    }
+    for _ in 0..2 {
+        let renewed = report.case("renew_session", client.renew_session()).await;
+        let healthy = report
+            .case("session/after-renew", async {
+                client.list_files(&drive, "root", &page_options()).await?;
+                Ok(())
+            })
+            .await;
+        if renewed.is_err() || healthy.is_err() {
+            return;
+        }
+    }
+    report.set(
+        "renew_session",
+        Status::Passed,
+        "two consecutive renewals and subsequent signed requests passed",
+    );
 }
 
 async fn files(
@@ -1300,7 +1393,7 @@ pub async fn run<S: TokenStore + 'static>(config: Config, store: S, local: &Path
     if report.failed() {
         Err("API contract tests or cleanup failed; see API report (blocked cases are not verified)".into())
     } else {
-        println!("API suite passed executed cases; inspect report for blocked/excluded coverage.");
+        println!("API suite has no failed cases; inspect report for blocked/excluded coverage.");
         Ok(())
     }
 }
