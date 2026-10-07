@@ -87,6 +87,24 @@ impl Client {
     }
 
     pub async fn connect_shared(config: Config, store: Arc<dyn TokenStore>) -> Result<Self> {
+        let client = Self::from_store(config, store)?;
+        {
+            let _guard = client.inner.recover.lock().await;
+            client.create_session_locked().await?;
+        }
+        Ok(client)
+    }
+
+    /// Refresh and persist credentials without creating or renewing a device session.
+    /// This always refreshes; callers may check `Credentials::is_expired` first.
+    /// As with `connect`, a persistence error does not return a usable client.
+    pub async fn refresh_credentials<S: TokenStore + 'static>(config: Config, store: S) -> Result<Credentials> {
+        let client = Self::from_store(config, Arc::new(store))?;
+        client.force_refresh().await?;
+        Ok(client.credentials().await)
+    }
+
+    fn from_store(config: Config, store: Arc<dyn TokenStore>) -> Result<Self> {
         let mut creds = store.load()?.ok_or(Error::NotLoggedIn)?;
         if creds.refresh_token.is_empty() {
             return Err(Error::NotLoggedIn);
@@ -116,10 +134,6 @@ impl Client {
                 recover: Mutex::new(()),
             }),
         };
-        {
-            let _guard = client.inner.recover.lock().await;
-            client.create_session_locked().await?;
-        }
         Ok(client)
     }
 

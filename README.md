@@ -368,6 +368,82 @@ Neither mode accesses `.env` automatically. The older opt-in tests in
 Enable GitHub Actions failure notifications; cron execution can be delayed and
 public repositories' schedules may be disabled after prolonged inactivity.
 
+### Independent refresh-token keepalive
+
+[Refresh Token Keepalive](.github/workflows/refresh-token.yml) is independent of
+the SDK build and live API test workflows. Its cron is **`23,53 * * * *`** (UTC),
+checking every 30 minutes, with manual dispatch also available.
+
+The runner's `--refresh-if-due` mode reads the latest `ALIYUNPAN_CREDENTIALS`
+environment secret when the job starts. It checks the actual access-token
+`expires_at` rather than assuming a fixed token lifetime:
+
+- More than **60 minutes** remain: succeed without rotating tokens or writing
+  the Secret.
+- At most 60 minutes remain, the token has expired, or access credentials are
+  incomplete: verify Secret write access, call `/v2/account/token` once, and
+  immediately save the rotated credential set. Existing transient HTTP retry
+  policy still applies; ambiguous transport failures are not replayed.
+- The refreshed access token lasts less than the 30-minute polling interval:
+  save the new credentials first, then fail explicitly so the schedule can be
+  adjusted. An invalid/revoked refresh token requires logging in again.
+
+`Client::refresh_credentials` uses the SDK's refresh and persistence logic without
+creating or renewing a device session. The keepalive job does not depend on the
+blocked `renew_session` endpoint, call file APIs, generate media, or upload artifacts.
+Persistence failures trigger the same write-only checkpoint recovery as the API
+test workflow. A recovered write does not turn the original failed step green.
+
+`expires_at` / `expires_in` describe the **access token**, not an independently
+documented refresh-token expiry. The server response used by this SDK exposes no
+refresh-token deadline, so the fixed cron checks access-token expiry and rotates
+refresh tokens proactively. GitHub scheduling delays, disabled schedules,
+revocation, writer-token expiry and a crash during rotation still prevent any
+absolute guarantee of validity. Monitor Actions failures and renew the GitHub
+writer token before it expires.
+
+#### Sharing credentials with other Actions
+
+Keep a **single source of truth**: `ALIYUNPAN_CREDENTIALS` in the existing
+`aliyunpan-monitor` Environment, not duplicated repository secrets. All workflows
+using that credential set must declare the same non-canceling concurrency group
+and attach the environment to the credential-consuming job:
+
+```yaml
+concurrency:
+  group: aliyunpan-monitor-credentials
+  cancel-in-progress: false
+
+jobs:
+  your-job:
+    runs-on: ubuntu-latest
+    environment: aliyunpan-monitor
+    steps:
+      - name: Run your credential-aware application
+        env:
+          ALIYUNPAN_CREDENTIALS: ${{ secrets.ALIYUNPAN_CREDENTIALS }}
+        run: your-application
+```
+
+Environment secrets are read when the job starts, unlike repository secrets
+snapshotted when a run is queued. Serializing **all** consumers prevents a job
+from refreshing an already-rotated token. `gh` cannot retrieve secret plaintext;
+GitHub Actions injects it into the job. Secret updates do not modify the current
+job's environment variables: use your application's updated in-memory/file state
+after refreshing, rather than rereading the original environment variable.
+Any consumer that refreshes tokens must itself persist them immediately to the
+same Environment Secret (with an appropriately scoped writer credential). A
+long-running job must still handle expiration; the cron is not a replacement
+for the SDK's automatic refresh. Do not invoke a nested workflow with the same
+concurrency group while holding that group.
+
+No new Secrets are needed. After deploying this workflow to the default branch:
+
+```sh
+gh workflow run refresh-token.yml --repo mingcheng/aliyunpan --ref main
+gh run list --repo mingcheng/aliyunpan --workflow refresh-token.yml --limit 5
+```
+
 ### Releases
 
 1. Update the package version and lockfile, then run the checks above.

@@ -27,11 +27,14 @@ fn catalog_covers_every_public_async_api_and_helper() {
         "next",
         "collect",
     ];
+    let separate_keepalive_workflow = ["refresh_credentials"];
     for source in sources {
         for signature in source.split("pub async fn ").skip(1) {
             let name = signature.split(['(', '<']).next().unwrap();
             assert!(
-                METHODS.contains(&name) || local_or_stream.contains(&name),
+                METHODS.contains(&name)
+                    || local_or_stream.contains(&name)
+                    || separate_keepalive_workflow.contains(&name),
                 "untracked API: {name}"
             );
         }

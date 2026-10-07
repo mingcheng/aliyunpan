@@ -1,5 +1,5 @@
 //! API monitor with immediate GitHub Environment Secret persistence.
-//! Usage: web_api_check <credentials.json> [--persist-only | --full <fixture-directory>]
+//! Usage: web_api_check <credentials.json> [--persist-only | --refresh-if-due | --full <fixture-directory>]
 
 #[path = "web_api_check/suite.rs"]
 mod suite;
@@ -15,6 +15,8 @@ use aliyunpan::{Client, Config, Credentials, Error, FileStore, ListOptions, Resu
 
 const ENVIRONMENT: &str = "aliyunpan-monitor";
 const SECRET: &str = "ALIYUNPAN_CREDENTIALS";
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const KEEPALIVE_MARGIN: Duration = Duration::from_secs(60 * 60);
 
 struct GitHubStore {
     file: FileStore,
@@ -161,12 +163,45 @@ fn required_env(name: &str) -> std::result::Result<String, String> {
         .ok_or_else(|| format!("missing required environment variable: {name}"))
 }
 
+async fn refresh_if_due(
+    config: Config,
+    store: GitHubStore,
+    credentials: Credentials,
+) -> std::result::Result<(), String> {
+    if !credentials.is_expired(KEEPALIVE_MARGIN) {
+        println!(
+            "NOT DUE: access token expires at Unix {}; no token rotation or Secret update",
+            credentials.expires_at
+        );
+        return Ok(());
+    }
+    // Test write access before consuming the old refresh token. Subsequent rotations
+    // are persisted by the same TokenStore hook, even if validation later fails.
+    checked("credential persistence preflight", store.save(&credentials))?;
+    let updated = checked(
+        "refresh and persist credentials",
+        Client::refresh_credentials(config, store).await,
+    )?;
+    if updated.is_expired(KEEPALIVE_INTERVAL) {
+        return Err("refreshed credentials were saved, but access-token lifetime is shorter than the polling interval; adjust the schedule".into());
+    }
+    println!(
+        "REFRESHED: rotated credentials saved; access token expires at Unix {}",
+        updated.expires_at
+    );
+    Ok(())
+}
+
 async fn run() -> std::result::Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let full = args.len() == 3 && args[1] == "--full";
     let persist_only = args.len() == 2 && args[1] == "--persist-only";
-    if args.len() != 1 && !full && !persist_only {
-        return Err("usage: web_api_check <credentials.json> [--persist-only | --full <fixture-directory>]".into());
+    let keepalive = args.len() == 2 && args[1] == "--refresh-if-due";
+    if args.len() != 1 && !full && !persist_only && !keepalive {
+        return Err(
+            "usage: web_api_check <credentials.json> [--persist-only | --refresh-if-due | --full <fixture-directory>]"
+                .into(),
+        );
     }
     required_env("GH_TOKEN")?;
     let store = GitHubStore {
@@ -194,17 +229,20 @@ async fn run() -> std::result::Result<(), String> {
         }
     }
     let credentials = initial_credentials(&required_env(SECRET)?)?;
-    // Verify write access before consuming a rotating token, and persist a new device ID.
-    checked("credential persistence preflight", store.save(&credentials))?;
     let config = Config {
         max_retries: 2,
-        request_timeout: if full {
+        request_timeout: if full || keepalive {
             Config::default().request_timeout
         } else {
             Duration::from_secs(30)
         },
         ..Config::default()
     };
+    if keepalive {
+        return refresh_if_due(config, store, credentials).await;
+    }
+    // Verify write access before consuming a rotating token, and persist a new device ID.
+    checked("credential persistence preflight", store.save(&credentials))?;
     if full {
         suite::run(config, store, std::path::Path::new(&args[2])).await
     } else {
@@ -272,6 +310,135 @@ mod tests {
 test "$*" = "secret set ALIYUNPAN_CREDENTIALS --env aliyunpan-monitor --repo owner/repo"
 cat > "$(dirname "$0")/published.json"
 "#;
+
+    fn keepalive_credentials() -> Credentials {
+        let mut c = common::initial_credentials();
+        c.user_id = USER_ID.into();
+        c.access_token = "at-0".into();
+        c.expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 7200;
+        c
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_skips_valid_credentials_without_writing_or_requests() {
+        let fixture = Fixture::new("exit 1");
+        let server = MockServer::start(|_| Response::error(500, "MustNotBeCalled")).await;
+        let mut credentials = keepalive_credentials();
+        credentials.expires_at -= 3540; // More than the 3600-second margin.
+        refresh_if_due(common::config(&server.url), fixture.store(), credentials)
+            .await
+            .unwrap();
+        assert!(server.requests().is_empty());
+        assert!(!fixture.dir.join("credentials.json").exists());
+        assert!(!fixture.dir.join("published.json").exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_uses_expiry_boundary_and_only_calls_token_endpoint() {
+        for remaining in [3600, 0, -60] {
+            let fixture = Fixture::new(PUBLISH);
+            let auth = Auth::default();
+            let server = MockServer::start(move |req| {
+                if req.path == "/v2/account/token" {
+                    return auth.handle(req).unwrap();
+                }
+                Response::error(403, "DeviceAndFileAPIsMustNotBeCalled")
+            })
+            .await;
+            let mut credentials = keepalive_credentials();
+            credentials.expires_at = credentials.expires_at - 7200 + remaining;
+            refresh_if_due(common::config(&server.url), fixture.store(), credentials)
+                .await
+                .unwrap();
+            assert_eq!(server.requests().len(), 1);
+            assert_eq!(server.count("/v2/account/token"), 1);
+            let published = fixture.published();
+            assert_eq!(published.refresh_token, "rt-1");
+            assert_eq!(published.device_id, common::DEVICE_ID);
+            assert!(!published.is_expired(KEEPALIVE_INTERVAL));
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_bootstraps_refresh_token_only_credentials() {
+        let fixture = Fixture::new(PUBLISH);
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| auth.handle(req).unwrap()).await;
+        refresh_if_due(
+            common::config(&server.url),
+            fixture.store(),
+            common::initial_credentials(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(fixture.published().refresh_token, "rt-1");
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_preflight_failure_never_consumes_refresh_token() {
+        let fixture = Fixture::new("exit 1");
+        let server = MockServer::start(|_| Response::error(500, "MustNotBeCalled")).await;
+        assert!(
+            refresh_if_due(
+                common::config(&server.url),
+                fixture.store(),
+                common::initial_credentials()
+            )
+            .await
+            .is_err()
+        );
+        assert!(server.requests().is_empty());
+        assert_eq!(fixture.store().file.load().unwrap().unwrap().refresh_token, "rt-0");
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_failed_rotation_write_retains_checkpoint() {
+        let fixture = Fixture::new(&format!(
+            "if test -f \"$(dirname \"$0\")/published.json\"; then exit 1; fi\n{PUBLISH}"
+        ));
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| auth.handle(req).unwrap()).await;
+        assert!(
+            refresh_if_due(
+                common::config(&server.url),
+                fixture.store(),
+                common::initial_credentials()
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(fixture.published().refresh_token, "rt-0");
+        assert_eq!(fixture.store().file.load().unwrap().unwrap().refresh_token, "rt-1");
+    }
+
+    #[tokio::test]
+    async fn refresh_if_due_short_lifetime_fails_after_persisting_rotation() {
+        let fixture = Fixture::new(PUBLISH);
+        let server = MockServer::start(|req| {
+            assert_eq!(req.path, "/v2/account/token");
+            Response::json(json!({
+                "access_token": "at-1", "refresh_token": "rt-1", "user_id": USER_ID,
+                "default_drive_id": DRIVE_ID, "expires_in": 60
+            }))
+        })
+        .await;
+        let error = refresh_if_due(
+            common::config(&server.url),
+            fixture.store(),
+            common::initial_credentials(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("lifetime is shorter than the polling interval"));
+        assert_eq!(fixture.published().refresh_token, "rt-1");
+        assert_eq!(server.requests().len(), 1);
+    }
 
     #[test]
     fn validates_initial_credentials_and_preserves_device() {
