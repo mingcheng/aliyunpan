@@ -41,9 +41,9 @@ impl Default for Config {
             download_referer: "https://www.aliyundrive.com/".into(),
             api_id: "pJZInNHN2dZWk8qg".into(),
             app_id: "25dzX3vbYqktVxyX".into(),
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                         (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                .into(),
+            user_agent:
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+                    .into(),
             device_name: "Chrome浏览器".into(),
             model_name: "Windows网页版".into(),
             chunk_size: DEFAULT_CHUNK_SIZE,
