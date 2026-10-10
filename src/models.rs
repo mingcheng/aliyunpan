@@ -307,6 +307,39 @@ pub struct VipItem {
     pub expire: i64,
 }
 
+/// A randomly drawn lucky bottle. Debug output omits resource details.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Bottle {
+    /// Kept as an integer to preserve IDs larger than JavaScript's safe integer range.
+    #[serde(deserialize_with = "nullable")]
+    pub bottle_id: u64,
+    #[serde(deserialize_with = "nullable")]
+    pub bottle_name: String,
+    #[serde(deserialize_with = "nullable")]
+    pub share_id: String,
+}
+
+impl std::fmt::Debug for Bottle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bottle").finish_non_exhaustive()
+    }
+}
+
+/// Server-reported lucky-bottle quotas. The draw limit is currently ten per day.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BottleUserLimit {
+    #[serde(deserialize_with = "nullable")]
+    pub create_bottle_limit: u64,
+    #[serde(deserialize_with = "nullable")]
+    pub create_bottle_used: u64,
+    #[serde(deserialize_with = "nullable")]
+    pub fish_bottle_limit: u64,
+    #[serde(deserialize_with = "nullable")]
+    pub fish_bottle_used: u64,
+}
+
 // ---------- Uploads / Downloads ----------
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -698,6 +731,27 @@ pub struct Album {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bottle_models_tolerate_missing_and_null_fields() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "bottleId": null, "bottleName": null, "shareId": null,
+                "createBottleLimit": null, "createBottleUsed": null,
+                "fishBottleLimit": null, "fishBottleUsed": null
+            }),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<Bottle>(value.clone()).unwrap(),
+                Bottle::default()
+            );
+            assert_eq!(
+                serde_json::from_value::<BottleUserLimit>(value).unwrap(),
+                BottleUserLimit::default()
+            );
+        }
+    }
 
     #[test]
     fn file_item_tolerates_nulls_and_missing_fields() {

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 fn catalog_covers_every_public_async_api_and_helper() {
     let sources = [
         include_str!("../../src/api/user.rs"),
+        include_str!("../../src/api/bottle.rs"),
         include_str!("../../src/api/file.rs"),
         include_str!("../../src/api/batch.rs"),
         include_str!("../../src/api/recycle.rs"),
@@ -74,6 +75,68 @@ fn rejects_empty_partial_duplicate_and_failed_batches() {
         .is_err()
     );
     assert!(batch_ok(vec![ok], 1).is_ok());
+}
+
+#[tokio::test]
+async fn bottle_checks_draw_by_default_with_remaining_quota() {
+    for (limit, used, expected) in [
+        (10, 0, Status::Passed),
+        (10, 3, Status::Passed),
+        (10, 9, Status::Passed),
+        (10, 10, Status::Blocked),
+        (10, 11, Status::Blocked),
+        (0, 0, Status::Blocked),
+    ] {
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| {
+            if let Some(response) = auth.handle(req).or_else(|| auth.check(req)) {
+                return response;
+            }
+            match req.path.as_str() {
+                "/adrive/v1/bottle/getUserLimit" => Response::json(json!({
+                    "createBottleLimit": 100, "createBottleUsed": 0,
+                    "fishBottleLimit": limit, "fishBottleUsed": used
+                })),
+                "/adrive/v1/bottle/fish" => Response::json(json!({
+                    "bottleId": 1734102344205721601_u64,
+                    "bottleName": "private-resource-name", "shareId": "private-share-id"
+                })),
+                _ => panic!("unexpected endpoint"),
+            }
+        })
+        .await;
+        let (client, _) = common::connect(&server).await;
+        let mut report = Report::new();
+        assert_eq!(report.outcomes["fish_bottle"].status, Status::Blocked);
+        bottles(&client, &mut report).await;
+        assert_eq!(report.outcomes["get_bottle_user_limit"].status, Status::Passed);
+        assert_eq!(report.outcomes["fish_bottle"].status, expected);
+        assert_eq!(server.count("/adrive/v1/bottle/getUserLimit"), 1);
+        assert_eq!(
+            server.count("/adrive/v1/bottle/fish"),
+            usize::from(expected == Status::Passed)
+        );
+        let text = serde_json::to_string(&report.outcomes).unwrap();
+        assert!(!text.contains("private-"));
+        assert!(!text.contains("1734102344205721601"));
+    }
+}
+
+#[tokio::test]
+async fn bottle_checks_do_not_draw_when_quota_query_fails() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req)
+            .or_else(|| auth.check(req))
+            .unwrap_or_else(|| Response::error(403, "Forbidden"))
+    })
+    .await;
+    let (client, _) = common::connect(&server).await;
+    let mut report = Report::new();
+    bottles(&client, &mut report).await;
+    assert_eq!(report.outcomes["get_bottle_user_limit"].status, Status::Failed);
+    assert_eq!(report.outcomes["fish_bottle"].status, Status::Blocked);
+    assert_eq!(server.count("/adrive/v1/bottle/fish"), 0);
 }
 
 #[tokio::test]

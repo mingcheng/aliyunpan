@@ -23,6 +23,167 @@ fn file_get_ok(req: &Request) -> Response {
     Response::json(file_json(&id, "a.bin", "file", "root"))
 }
 
+fn bottle_json() -> Value {
+    json!({
+        "bottleId": 1734102344205721601_u64,
+        "bottleName": "Example resource",
+        "shareId": "example-share"
+    })
+}
+
+#[tokio::test]
+async fn bottle_endpoints_send_authenticated_empty_posts_and_decode_camel_case() {
+    let auth = Auth::default();
+    let quota = json!({
+        "createBottleLimit": 100, "createBottleUsed": 0,
+        "fishBottleLimit": 10, "fishBottleUsed": 3
+    });
+    let response = quota.clone();
+    let server = MockServer::start(move |req| {
+        if let Some(response) = auth.handle(req).or_else(|| auth.check(req)) {
+            return response;
+        }
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.header("x-device-id"), Some(DEVICE_ID));
+        match req.path.as_str() {
+            "/adrive/v1/bottle/fish" => Response::json(bottle_json()),
+            "/adrive/v1/bottle/getUserLimit" => Response::json(response.clone()),
+            _ => panic!("unexpected endpoint"),
+        }
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    let limit = client.get_bottle_user_limit().await.unwrap();
+    assert_eq!(limit.create_bottle_limit, 100);
+    assert_eq!(limit.create_bottle_used, 0);
+    assert_eq!(limit.fish_bottle_limit, 10);
+    assert_eq!(limit.fish_bottle_used, 3);
+    assert_eq!(serde_json::to_value(limit).unwrap(), quota);
+    assert_eq!(server.count("/adrive/v1/bottle/fish"), 0);
+    let bottle = client.fish_bottle().await.unwrap();
+    assert_eq!(bottle.bottle_id, 1734102344205721601);
+    assert_eq!(bottle.bottle_name, "Example resource");
+    assert_eq!(bottle.share_id, "example-share");
+    assert_eq!(serde_json::to_value(&bottle).unwrap(), bottle_json());
+    let debug = format!("{bottle:?}");
+    for private in ["1734102344205721601", "Example resource", "example-share"] {
+        assert!(!debug.contains(private));
+    }
+    for path in ["/adrive/v1/bottle/fish", "/adrive/v1/bottle/getUserLimit"] {
+        assert_eq!(server.count(path), 1);
+        assert_eq!(server.find(path)[0].json(), json!({}));
+    }
+}
+
+#[tokio::test]
+async fn bottle_api_errors_are_preserved_without_retrying() {
+    for status in [200, 403] {
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| {
+            auth.handle(req).or_else(|| auth.check(req)).unwrap_or_else(|| {
+                // Synthetic code: the live quota-exhaustion code is not yet known.
+                Response::error(status, "MockBottleQuotaExceeded")
+            })
+        })
+        .await;
+        let (client, _) = connect(&server).await;
+        for result in [
+            client.fish_bottle().await.map(|_| ()),
+            client.get_bottle_user_limit().await.map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            let api = error.api().unwrap();
+            assert_eq!(api.code, "MockBottleQuotaExceeded");
+            assert_eq!(api.http_status, status);
+        }
+        assert_eq!(server.count("/adrive/v1/bottle/fish"), 1);
+        assert_eq!(server.count("/adrive/v1/bottle/getUserLimit"), 1);
+    }
+}
+
+#[tokio::test]
+async fn bottle_draw_does_not_retry_transient_statuses_or_timeouts() {
+    for status in [200, 429, 502, 503, 504] {
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| {
+            auth.handle(req).or_else(|| auth.check(req)).unwrap_or_else(|| {
+                if status == 200 {
+                    Response::json(bottle_json()).delayed(Duration::from_millis(600))
+                } else {
+                    Response::with_status(status, json!({}))
+                }
+            })
+        })
+        .await;
+        let mut cfg = config(&server.url);
+        cfg.request_timeout = Duration::from_millis(200);
+        let (client, _) = connect_with(cfg, &server).await;
+        let error = client.fish_bottle().await.unwrap_err();
+        match status {
+            200 => assert!(matches!(error, Error::Network(e) if e.is_timeout())),
+            429 => assert!(matches!(error, Error::RateLimited { status: 429, .. })),
+            _ => assert!(matches!(error, Error::Http { status: actual, .. } if actual == status)),
+        }
+        assert_eq!(server.count("/adrive/v1/bottle/fish"), 1);
+    }
+}
+
+#[tokio::test]
+async fn bottle_draw_recovers_from_explicit_authentication_rejection() {
+    for code in ["AccessTokenInvalid", "DeviceSessionSignatureInvalid"] {
+        let auth = Auth::default();
+        let attempts = AtomicUsize::new(0);
+        let server = MockServer::start(move |req| {
+            if let Some(response) = auth.handle(req).or_else(|| auth.check(req)) {
+                return response;
+            }
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Response::error(401, code)
+            } else {
+                Response::json(bottle_json())
+            }
+        })
+        .await;
+        let (client, _) = connect(&server).await;
+        assert_eq!(client.fish_bottle().await.unwrap().share_id, "example-share");
+        assert_eq!(server.count("/adrive/v1/bottle/fish"), 2);
+    }
+}
+
+#[tokio::test]
+async fn bottle_endpoints_reject_invalid_success_shapes_without_leaking_values() {
+    for value in [
+        Value::Null,
+        json!({}),
+        json!({"message": "private-notice"}),
+        json!({"bottleId": null, "bottleName": "private-name", "shareId": "private-share"}),
+        json!({"bottleId": 1734102344205721601_u64, "bottleName": "private-name", "shareId": ""}),
+        json!({"bottleId": "private-id", "bottleName": "private-name", "shareId": "private-share"}),
+        json!({"createBottleLimit": 100, "createBottleUsed": 0, "fishBottleLimit": 10}),
+        json!({"createBottleLimit": 100, "createBottleUsed": 0, "fishBottleLimit": null, "fishBottleUsed": 3}),
+        json!({"createBottleLimit": 100, "createBottleUsed": 0, "fishBottleLimit": 10, "fishBottleUsed": -1}),
+    ] {
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| {
+            auth.handle(req)
+                .or_else(|| auth.check(req))
+                .unwrap_or_else(|| Response::json(value.clone()))
+        })
+        .await;
+        let (client, _) = connect(&server).await;
+        for result in [
+            client.fish_bottle().await.map(|_| ()),
+            client.get_bottle_user_limit().await.map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert!(matches!(error, Error::UnexpectedResponse { .. }));
+            let text = format!("{error:?}");
+            assert!(!text.contains("private-"));
+            assert!(!text.contains("1734102344205721601"));
+        }
+    }
+}
+
 #[tokio::test]
 async fn transfer_timeouts_retry_identical_gets_and_part_puts() {
     for upload in [false, true] {

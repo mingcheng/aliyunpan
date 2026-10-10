@@ -403,6 +403,19 @@ impl Client {
         sign: bool,
         extra: &[(&'static str, String)],
     ) -> Result<R> {
+        self.request_with_retries(host, path, body, sign, extra, self.inner.config.max_retries)
+            .await
+    }
+
+    pub(crate) async fn request_with_retries<R: DeserializeOwned>(
+        &self,
+        host: Host,
+        path: &str,
+        body: &impl Serialize,
+        sign: bool,
+        extra: &[(&'static str, String)],
+        max_retries: u32,
+    ) -> Result<R> {
         let payload = to_payload(body)?;
         let mut token_retried = false;
         let mut session_retried = false;
@@ -426,7 +439,10 @@ impl Client {
                 headers.extend_from_slice(extra);
                 (headers, s.creds.access_token.clone(), s.epoch)
             };
-            match self.execute(host, path, &payload, &headers).await {
+            match self
+                .execute_with_retries(host, path, &payload, &headers, max_retries)
+                .await
+            {
                 Ok(bytes) => return decode(&bytes),
                 Err(e) if !token_retried && e.api_kind() == Some(ApiErrorKind::AccessTokenInvalid) => {
                     token_retried = true;

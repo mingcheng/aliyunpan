@@ -1,5 +1,6 @@
 mod album;
 mod batch;
+mod bottle;
 mod file;
 mod recycle;
 mod share;
