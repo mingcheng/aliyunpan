@@ -14,7 +14,10 @@ pub struct Config {
     pub api_id: String,
     pub app_id: String,
     pub user_agent: String,
+    /// Device-session display name; defaults to `aliyunpan client v<crate version>`.
     pub device_name: String,
+    /// Defaults to `Third-party Rust SDK`, with a build date if `ALIYUNPAN_BUILD_DATE`
+    /// is non-empty when this crate is compiled.
     pub model_name: String,
     /// Preferred chunk size, increased automatically to keep the part count at or below 10,000.
     pub chunk_size: u64,
@@ -45,8 +48,11 @@ impl Default for Config {
             user_agent:
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
                     .into(),
-            device_name: "Chrome Web Browser".into(),
-            model_name: "Windows Web Version".into(),
+            device_name: format!("aliyunpan client v{}", env!("CARGO_PKG_VERSION")),
+            model_name: match option_env!("ALIYUNPAN_BUILD_DATE").map(str::trim) {
+                Some(date) if !date.is_empty() => format!("Third-party Rust SDK (built {date})"),
+                _ => "Third-party Rust SDK".into(),
+            },
             chunk_size: DEFAULT_CHUNK_SIZE,
             max_retries: 10,
             retry_delay: Duration::from_secs(2),
@@ -72,5 +78,25 @@ impl Config {
 
     pub(crate) fn referer(&self) -> String {
         format!("{}/", self.web_url.trim_end_matches('/'))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_device_identity() {
+        let config = Config::default();
+        assert_eq!(
+            config.device_name,
+            format!("aliyunpan client v{}", env!("CARGO_PKG_VERSION"))
+        );
+        let date = option_env!("ALIYUNPAN_BUILD_DATE").unwrap_or("").trim();
+        if date.is_empty() {
+            assert_eq!(config.model_name, "Third-party Rust SDK");
+        } else {
+            assert_eq!(config.model_name, format!("Third-party Rust SDK (built {date})"));
+        }
     }
 }
