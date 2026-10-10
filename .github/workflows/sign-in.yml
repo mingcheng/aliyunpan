@@ -1,9 +1,9 @@
-name: Refresh Token Keepalive
+name: Daily Sign In
 
 on:
   schedule:
-    # Check every 2 hours at 23 and 53 minutes past the hour.
-    - cron: "23,53 */2 * * *"
+    # 01:17 UTC / 09:17 Asia/Shanghai, every day.
+    - cron: "17 1 * * *"
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  refresh:
+  sign-in:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: aliyunpan-monitor
@@ -32,24 +32,24 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Test expiry and persistence without real credentials
-        run: cargo test --locked --example web_api_check refresh_if_due
+      - name: Test sign-in and persistence without real credentials
+        run: cargo test --locked --example web_api_check sign_in
 
-      - name: Build credential runner
+      - name: Build sign-in runner
         run: cargo build --locked --example web_api_check
 
-      - name: Refresh only when credentials are due
-        id: refresh
+      - name: Request daily sign-in and persist rotated credentials
+        id: sign_in
         timeout-minutes: 5
         env:
           ALIYUNPAN_CREDENTIALS: ${{ secrets.ALIYUNPAN_CREDENTIALS }}
           GH_TOKEN: ${{ secrets.ALIYUNPAN_SECRET_WRITER }}
           GH_REPO: ${{ github.repository }}
         run: |
-          target/debug/examples/web_api_check "$RUNNER_TEMP/aliyunpan-credentials.json" --refresh-if-due
+          target/debug/examples/web_api_check "$RUNNER_TEMP/aliyunpan-credentials.json" --sign-in
 
       - name: Retry checkpoint persistence after failure
-        if: ${{ always() && (steps.refresh.outcome == 'failure' || steps.refresh.outcome == 'cancelled') }}
+        if: ${{ always() && (steps.sign_in.outcome == 'failure' || steps.sign_in.outcome == 'cancelled') }}
         timeout-minutes: 3
         env:
           GH_TOKEN: ${{ secrets.ALIYUNPAN_SECRET_WRITER }}
@@ -58,7 +58,7 @@ jobs:
           if test -f "$RUNNER_TEMP/aliyunpan-credentials.json"; then
             target/debug/examples/web_api_check "$RUNNER_TEMP/aliyunpan-credentials.json" --persist-only
           else
-            echo "::error::No credential checkpoint exists; inspect the refresh failure."
+            echo "::error::No credential checkpoint exists; inspect the sign-in failure."
             exit 1
           fi
 

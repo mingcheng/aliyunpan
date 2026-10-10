@@ -1,5 +1,5 @@
 //! API monitor with immediate GitHub Environment Secret persistence.
-//! Usage: web_api_check <credentials.json> [--persist-only | --refresh-if-due | --full <fixture-directory>]
+//! Usage: web_api_check <credentials.json> [--persist-only | --refresh-if-due | --sign-in | --full <fixture-directory>]
 
 #[path = "web_api_check/suite.rs"]
 mod suite;
@@ -156,6 +156,22 @@ async fn probe(config: Config, store: GitHubStore) -> std::result::Result<(), St
     Ok(())
 }
 
+async fn daily_sign_in(config: Config, store: GitHubStore) -> std::result::Result<(), String> {
+    let client = checked(
+        "refresh token / persist credentials / create device session",
+        Client::connect(config, store).await,
+    )?;
+    let info = checked("daily sign-in request", client.sign_in().await)?;
+    println!(
+        "REQUEST OK: success=true, isSignIn={}, signInDay={}",
+        info.is_sign_in, info.sign_in_day
+    );
+    if !info.is_sign_in {
+        println!("isSignIn=false can mean already signed in or an unsuccessful sign-in; cause is undetermined");
+    }
+    Ok(())
+}
+
 fn required_env(name: &str) -> std::result::Result<String, String> {
     std::env::var(name)
         .ok()
@@ -197,9 +213,10 @@ async fn run() -> std::result::Result<(), String> {
     let full = args.len() == 3 && args[1] == "--full";
     let persist_only = args.len() == 2 && args[1] == "--persist-only";
     let keepalive = args.len() == 2 && args[1] == "--refresh-if-due";
-    if args.len() != 1 && !full && !persist_only && !keepalive {
+    let sign_in = args.len() == 2 && args[1] == "--sign-in";
+    if args.len() != 1 && !full && !persist_only && !keepalive && !sign_in {
         return Err(
-            "usage: web_api_check <credentials.json> [--persist-only | --refresh-if-due | --full <fixture-directory>]"
+            "usage: web_api_check <credentials.json> [--persist-only | --refresh-if-due | --sign-in | --full <fixture-directory>]"
                 .into(),
         );
     }
@@ -230,7 +247,7 @@ async fn run() -> std::result::Result<(), String> {
     }
     let credentials = initial_credentials(&required_env(SECRET)?)?;
     let config = Config {
-        max_retries: 2,
+        max_retries: if sign_in { 0 } else { 2 },
         request_timeout: if full || keepalive {
             Config::default().request_timeout
         } else {
@@ -245,6 +262,8 @@ async fn run() -> std::result::Result<(), String> {
     checked("credential persistence preflight", store.save(&credentials))?;
     if full {
         suite::run(config, store, std::path::Path::new(&args[2])).await
+    } else if sign_in {
+        daily_sign_in(config, store).await
     } else {
         probe(config, store).await
     }
@@ -321,6 +340,84 @@ cat > "$(dirname "$0")/published.json"
             .as_secs() as i64
             + 7200;
         c
+    }
+
+    #[tokio::test]
+    async fn daily_sign_in_accepts_both_flags_and_persists_before_request() {
+        for sign_in_flag in [false, true] {
+            let fixture = Fixture::new(PUBLISH);
+            let store = fixture.store();
+            store.save(&common::initial_credentials()).unwrap();
+            let published = fixture.dir.join("published.json");
+            let auth = Auth::default();
+            let server = MockServer::start(move |req| {
+                if let Some(response) = auth.handle(req) {
+                    return response;
+                }
+                assert_eq!(req.path, "/v2/activity/sign_in_info");
+                assert_eq!(req.method, "POST");
+                assert_eq!(req.header("authorization"), Some(auth.token().as_str()));
+                assert_eq!(req.json(), json!({}));
+                let saved: Credentials = serde_json::from_slice(&fs::read(&published).unwrap()).unwrap();
+                assert_eq!(saved.refresh_token, "rt-1");
+                let mut response = common::sign_in_json();
+                response["result"]["isSignIn"] = sign_in_flag.into();
+                Response::json(response)
+            })
+            .await;
+            daily_sign_in(common::config(&server.url), store).await.unwrap();
+            assert_eq!(server.count("/v2/account/token"), 1);
+            assert_eq!(server.count("/users/v1/users/device/create_session"), 1);
+            assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+            assert_eq!(server.requests().len(), 3);
+            assert_eq!(fixture.published().refresh_token, "rt-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn daily_sign_in_failure_retains_rotated_credentials_and_redacts_details() {
+        for status in [200, 403] {
+            let fixture = Fixture::new(PUBLISH);
+            let store = fixture.store();
+            store.save(&common::initial_credentials()).unwrap();
+            let auth = Auth::default();
+            let server = MockServer::start(move |req| {
+                auth.handle(req).unwrap_or_else(|| {
+                    Response::with_status(
+                        status,
+                        json!({"success": false, "code": null, "message": "private-sign-in-details"}),
+                    )
+                })
+            })
+            .await;
+            let error = daily_sign_in(common::config(&server.url), store).await.unwrap_err();
+            assert!(error.contains("daily sign-in request"));
+            assert!(!error.contains("private-sign-in-details"));
+            assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+            assert_eq!(fixture.published().refresh_token, "rt-1");
+            assert_eq!(fixture.store().file.load().unwrap().unwrap().refresh_token, "rt-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn daily_sign_in_failed_publish_stops_before_endpoint_and_keeps_checkpoint() {
+        let fixture = Fixture::new(PUBLISH);
+        let store = fixture.store();
+        store.save(&common::initial_credentials()).unwrap();
+        fs::write(&store.gh, "#!/bin/sh\nexit 1\n").unwrap();
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| {
+            auth.handle(req)
+                .unwrap_or_else(|| Response::error(404, "UnexpectedRequest"))
+        })
+        .await;
+        let error = daily_sign_in(common::config(&server.url), store).await.unwrap_err();
+        assert!(error.contains("credential storage/process failure"));
+        assert_eq!(server.count("/v2/account/token"), 1);
+        assert_eq!(server.count("/users/v1/users/device/create_session"), 0);
+        assert_eq!(server.count("/v2/activity/sign_in_info"), 0);
+        assert_eq!(fixture.published().refresh_token, "rt-0");
+        assert_eq!(fixture.store().file.load().unwrap().unwrap().refresh_token, "rt-1");
     }
 
     #[tokio::test]
