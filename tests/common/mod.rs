@@ -287,6 +287,35 @@ pub fn file_json(file_id: &str, name: &str, kind: &str, parent: &str) -> Value {
     })
 }
 
+pub fn sign_in_json() -> Value {
+    json!({
+        "success": true, "code": null, "message": null,
+        "totalCount": null, "nextToken": null, "maxResults": null, "arguments": null,
+        "result": {
+            "isSignIn": false, "year": "2026", "month": "\u{5341}\u{6708}", "day": "10", "signInDay": 5,
+            "blessing": "private-blessing", "subtitle": "private-subtitle",
+            "themeIcon": "https://example.invalid/private-icon",
+            "themeAction": "smartdrive://webview?url=private-theme-action", "theme": "",
+            "action": "smartdrive://webview?url=private-action",
+            "rewards": [
+                {
+                    "id": null, "name": "private-reward", "rewardImage": "https://example.invalid/private-reward",
+                    "rewardDesc": "private-description", "nameIcon": "", "type": "dailySignIn",
+                    "actionText": null, "action": null, "status": "finished", "remind": "private-reminder",
+                    "remindIcon": "", "expire": null, "position": 1, "idempotent": null
+                },
+                {
+                    "id": null, "name": "private-task", "rewardImage": null, "rewardDesc": null,
+                    "nameIcon": "", "type": "dailyTask", "actionText": null,
+                    "action": "smartdrive://app/channel_backup", "status": "unfinished",
+                    "remind": "private-task-reminder", "remindIcon": "", "expire": null,
+                    "position": 2, "idempotent": null
+                }
+            ]
+        }
+    })
+}
+
 pub fn sha1_upper(data: &[u8]) -> String {
     use sha1::{Digest, Sha1};
     Sha1::digest(data).iter().map(|b| format!("{b:02X}")).collect()

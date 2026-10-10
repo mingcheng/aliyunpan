@@ -243,6 +243,9 @@ pub(crate) fn unexpected_response(operation: &'static str, body: &Value) -> Erro
         "createBottleUsed",
         "fishBottleLimit",
         "fishBottleUsed",
+        "isSignIn",
+        "signInDay",
+        "rewards",
         "error",
         "error_description",
         "error_message",
@@ -274,6 +277,7 @@ pub(crate) fn unexpected_response(operation: &'static str, body: &Value) -> Erro
     for (prefix, object) in [
         ("", Some(body)),
         ("data.", body.get("data")),
+        ("result.", body.get("result")),
         ("error.", body.get("error")),
     ] {
         for key in keys {

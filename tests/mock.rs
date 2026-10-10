@@ -32,6 +32,152 @@ fn bottle_json() -> Value {
 }
 
 #[tokio::test]
+async fn sign_in_uses_member_host_and_bearer_auth_and_decodes_full_result() {
+    let auth = Arc::new(Auth::default());
+    let a = auth.clone();
+    let server = MockServer::start(move |req| a.handle(req).expect("only authentication on the API host")).await;
+    let member = MockServer::start(move |req| {
+        assert_eq!(req.path, "/v2/activity/sign_in_info");
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.header("authorization"), Some(auth.token().as_str()));
+        assert!(req.header("x-signature").is_none());
+        assert!(req.header("x-device-id").is_none());
+        Response::json(sign_in_json())
+    })
+    .await;
+    let mut cfg = config(&server.url);
+    cfg.member_url = member.url.clone();
+    let (client, _) = connect_with(cfg, &server).await;
+    let info = client.sign_in().await.unwrap();
+    assert!(!info.is_sign_in);
+    assert_eq!(info.year, "2026");
+    assert_eq!(info.month, "十月");
+    assert_eq!(info.day, "10");
+    assert_eq!(info.sign_in_day, 5);
+    assert_eq!(info.rewards.len(), 2);
+    assert_eq!(info.rewards[0].kind, "dailySignIn");
+    assert_eq!(info.rewards[0].status, "finished");
+    assert_eq!(info.rewards[1].kind, "dailyTask");
+    assert_eq!(info.rewards[1].status, "unfinished");
+    assert!(info.rewards[1].reward_image.is_none());
+    assert_eq!(serde_json::to_value(&info).unwrap(), sign_in_json()["result"]);
+    let debug = format!("{info:?} {:?}", info.rewards);
+    for private in ["private-", "https://", "smartdrive://"] {
+        assert!(!debug.contains(private));
+    }
+    assert_eq!(member.count("/v2/activity/sign_in_info"), 1);
+    assert_eq!(member.find("/v2/activity/sign_in_info")[0].json(), json!({}));
+    assert_eq!(server.count("/v2/activity/sign_in_info"), 0);
+}
+
+#[tokio::test]
+async fn sign_in_preserves_unsigned_status_and_nullable_optional_fields() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req).unwrap_or_else(|| {
+            Response::json(json!({
+                "success": true, "code": null,
+                "result": {"isSignIn": false, "signInDay": null, "year": null, "rewards": null}
+            }))
+        })
+    })
+    .await;
+    let (client, _) = connect(&server).await;
+    let info = client.sign_in().await.unwrap();
+    assert!(!info.is_sign_in);
+    assert_eq!(info.sign_in_day, 0);
+    assert!(info.year.is_empty());
+    assert!(info.rewards.is_empty());
+}
+
+#[tokio::test]
+async fn sign_in_refreshes_rejected_bearer_token_and_persists_it() {
+    let auth = Auth::default();
+    let attempts = AtomicUsize::new(0);
+    let server = MockServer::start(move |req| {
+        if let Some(response) = auth.handle(req) {
+            return response;
+        }
+        assert_eq!(req.header("authorization"), Some(auth.token().as_str()));
+        assert!(req.header("x-signature").is_none());
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Response::error(401, "AccessTokenInvalid")
+        } else {
+            Response::json(sign_in_json())
+        }
+    })
+    .await;
+    let (client, store) = connect(&server).await;
+    assert!(!client.sign_in().await.unwrap().is_sign_in);
+    assert_eq!(store.get().unwrap().refresh_token, "rt-2");
+    assert_eq!(server.count("/v2/account/token"), 2);
+    assert_eq!(server.count("/v2/activity/sign_in_info"), 2);
+}
+
+#[tokio::test]
+async fn sign_in_rejects_failed_or_malformed_envelopes_without_leaking_values() {
+    for value in [
+        Value::Null,
+        json!({}),
+        json!({"success": false, "code": null, "message": "private-message", "result": {"isSignIn": true}}),
+        json!({"success": true, "result": null}),
+        json!({"success": true, "result": {}}),
+        json!({"success": true, "result": {"isSignIn": null}}),
+        json!({"result": {"isSignIn": true}}),
+        json!({"success": true, "result": {"isSignIn": "private-value"}}),
+        json!({"success": true, "result": {"isSignIn": true, "signInDay": -1}}),
+        json!({"success": true, "result": {"isSignIn": true, "rewards": [{"position": "private-value"}]}}),
+    ] {
+        let auth = Auth::default();
+        let server =
+            MockServer::start(move |req| auth.handle(req).unwrap_or_else(|| Response::json(value.clone()))).await;
+        let (client, _) = connect(&server).await;
+        let error = client.sign_in().await.unwrap_err();
+        assert!(matches!(
+            &error,
+            Error::UnexpectedResponse {
+                operation: "sign_in",
+                ..
+            }
+        ));
+        assert!(!format!("{error:?}").contains("private-"));
+        assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+    }
+}
+
+#[tokio::test]
+async fn sign_in_preserves_api_errors_including_http_200() {
+    for status in [200, 403] {
+        let auth = Auth::default();
+        let server = MockServer::start(move |req| {
+            auth.handle(req)
+                .unwrap_or_else(|| Response::error(status, "MockSignInRejected"))
+        })
+        .await;
+        let (client, _) = connect(&server).await;
+        let error = client.sign_in().await.unwrap_err();
+        assert_eq!(error.api().unwrap().code, "MockSignInRejected");
+        assert_eq!(error.api().unwrap().http_status, status);
+        assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+    }
+}
+
+#[tokio::test]
+async fn sign_in_does_not_replay_transport_timeouts() {
+    let auth = Auth::default();
+    let server = MockServer::start(move |req| {
+        auth.handle(req)
+            .unwrap_or_else(|| Response::json(sign_in_json()).delayed(Duration::from_millis(600)))
+    })
+    .await;
+    let mut cfg = config(&server.url);
+    cfg.request_timeout = Duration::from_millis(200);
+    let (client, _) = connect_with(cfg, &server).await;
+    assert!(matches!(client.sign_in().await.unwrap_err(), Error::Network(error) if error.is_timeout()));
+    assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+}
+
+#[tokio::test]
 async fn bottle_endpoints_send_authenticated_empty_posts_and_decode_camel_case() {
     let auth = Auth::default();
     let quota = json!({

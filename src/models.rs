@@ -307,6 +307,84 @@ pub struct VipItem {
     pub expire: i64,
 }
 
+/// Daily sign-in status and rewards, unwrapped from the member API's `result`.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SignInInfo {
+    /// Server sign-in outcome flag. False can mean already signed in or an unsuccessful sign-in.
+    /// It does not identify the reason, and is independent of request success and reward/task status.
+    #[serde(deserialize_with = "nullable")]
+    pub is_sign_in: bool,
+    #[serde(deserialize_with = "nullable")]
+    pub year: String,
+    /// Server-localized month text, not necessarily a number.
+    #[serde(deserialize_with = "nullable")]
+    pub month: String,
+    #[serde(deserialize_with = "nullable")]
+    pub day: String,
+    #[serde(deserialize_with = "nullable")]
+    pub sign_in_day: u32,
+    #[serde(deserialize_with = "nullable")]
+    pub blessing: String,
+    #[serde(deserialize_with = "nullable")]
+    pub subtitle: String,
+    #[serde(deserialize_with = "nullable")]
+    pub theme_icon: String,
+    #[serde(deserialize_with = "nullable")]
+    pub theme_action: String,
+    #[serde(deserialize_with = "nullable")]
+    pub theme: String,
+    #[serde(deserialize_with = "nullable")]
+    pub action: String,
+    #[serde(deserialize_with = "nullable")]
+    pub rewards: Vec<SignInReward>,
+}
+
+impl std::fmt::Debug for SignInInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignInInfo")
+            .field("is_sign_in", &self.is_sign_in)
+            .field("sign_in_day", &self.sign_in_day)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A daily sign-in reward or task. Status and type retain the server's original strings.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SignInReward {
+    /// Non-null values have no verified schema; preserve them as JSON.
+    pub id: Option<Value>,
+    #[serde(deserialize_with = "nullable")]
+    pub name: String,
+    pub reward_image: Option<String>,
+    pub reward_desc: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub name_icon: String,
+    #[serde(rename = "type", deserialize_with = "nullable")]
+    pub kind: String,
+    pub action_text: Option<String>,
+    pub action: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub status: String,
+    #[serde(deserialize_with = "nullable")]
+    pub remind: String,
+    #[serde(deserialize_with = "nullable")]
+    pub remind_icon: String,
+    /// Non-null values have no verified schema; preserve them as JSON.
+    pub expire: Option<Value>,
+    #[serde(deserialize_with = "nullable")]
+    pub position: u32,
+    /// Non-null values have no verified schema; preserve them as JSON.
+    pub idempotent: Option<Value>,
+}
+
+impl std::fmt::Debug for SignInReward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignInReward").finish_non_exhaustive()
+    }
+}
+
 /// A randomly drawn lucky bottle. Debug output omits resource details.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -731,6 +809,50 @@ pub struct Album {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_flag_is_independent_of_reward_status() {
+        for flag in [false, true] {
+            for status in ["finished", "unfinished"] {
+                let info: SignInInfo = serde_json::from_value(serde_json::json!({
+                    "isSignIn": flag,
+                    "rewards": [{"type": "dailySignIn", "status": status}]
+                }))
+                .unwrap();
+                assert_eq!(info.is_sign_in, flag);
+                assert_eq!(info.rewards[0].status, status);
+            }
+        }
+    }
+
+    #[test]
+    fn sign_in_models_tolerate_nulls_and_preserve_unverified_reward_fields() {
+        let info: SignInInfo = serde_json::from_value(serde_json::json!({
+            "isSignIn": null, "year": null, "month": null, "day": null, "signInDay": null,
+            "blessing": null, "subtitle": null, "themeIcon": null, "themeAction": null,
+            "theme": null, "action": null, "rewards": null
+        }))
+        .unwrap();
+        assert_eq!(info, SignInInfo::default());
+        assert_eq!(serde_json::from_str::<SignInInfo>("{}").unwrap(), SignInInfo::default());
+        let reward: SignInReward = serde_json::from_value(serde_json::json!({
+            "name": null, "rewardImage": null, "rewardDesc": null, "nameIcon": null,
+            "type": null, "actionText": null, "action": null, "status": null,
+            "remind": null, "remindIcon": null, "position": null
+        }))
+        .unwrap();
+        assert_eq!(reward, SignInReward::default());
+        let reward: SignInReward = serde_json::from_value(serde_json::json!({
+            "id": 1734102344205721601_u64, "expire": "2026-12-31", "idempotent": true,
+            "type": "futureTask", "status": "futureStatus"
+        }))
+        .unwrap();
+        assert_eq!(reward.id.as_ref().and_then(Value::as_u64), Some(1734102344205721601));
+        assert_eq!(reward.expire.as_ref().and_then(Value::as_str), Some("2026-12-31"));
+        assert_eq!(reward.idempotent.as_ref().and_then(Value::as_bool), Some(true));
+        assert_eq!(reward.kind, "futureTask");
+        assert_eq!(reward.status, "futureStatus");
+    }
 
     #[test]
     fn bottle_models_tolerate_missing_and_null_fields() {

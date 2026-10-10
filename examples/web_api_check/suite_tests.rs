@@ -298,6 +298,7 @@ async fn independent_account_cases_continue_after_rejection() {
             "/v2/sbox/get" => Response::json(json!({"insurance_enabled": false})),
             "/adrive/v1/user/albums_info" => Response::json(json!({"data": {"driveId": "album-drive"}})),
             "/business/v1.0/users/vip/info" => Response::json(json!({"identity": "member"})),
+            "/v2/activity/sign_in_info" => Response::json(common::sign_in_json()),
             "/users/v1/users/device/renew_session" => Response::json(json!({"result": true, "success": true})),
             "/adrive/v3/share_link/list" | "/adrive/v1/album/list" | "/adrive/v3/file/list" => {
                 Response::json(json!({"items": []}))
@@ -316,10 +317,42 @@ async fn independent_account_cases_continue_after_rejection() {
         "get_sbox_info",
         "get_albums_info",
         "get_vip_info",
+        "sign_in",
         "list_albums",
         "list_all_albums",
     ] {
         assert_eq!(report.outcomes[case].status, Status::Passed, "{case}");
+    }
+    assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+    assert!(!serde_json::to_string(&report.outcomes).unwrap().contains("private-"));
+}
+
+#[tokio::test]
+async fn sign_in_suite_tracks_request_success_not_sign_in_outcome() {
+    for success in [false, true] {
+        for sign_in_flag in [false, true] {
+            let auth = Auth::default();
+            let server = MockServer::start(move |req| {
+                if let Some(response) = auth.handle(req) {
+                    return response;
+                }
+                if req.path == "/v2/activity/sign_in_info" {
+                    Response::json(json!({"success": success, "result": {"isSignIn": sign_in_flag}}))
+                } else {
+                    Response::error(403, "PermissionDenied")
+                }
+            })
+            .await;
+            let (client, _) = common::connect(&server).await;
+            let mut report = Report::new();
+            account(&client, &mut report).await;
+            assert_eq!(
+                report.outcomes["sign_in"].status,
+                if success { Status::Passed } else { Status::Failed }
+            );
+            assert_eq!(server.count("/v2/activity/sign_in_info"), 1);
+            assert_eq!(server.count("/adrive/v1/bottle/getUserLimit"), 1);
+        }
     }
 }
 

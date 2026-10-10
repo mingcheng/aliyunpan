@@ -9,6 +9,8 @@ pub struct Config {
     pub auth_url: String,
     pub api_url: String,
     pub user_url: String,
+    /// Daily sign-in and membership endpoints.
+    pub member_url: String,
     /// Download Referer. The web API requires the legacy domain.
     pub download_referer: String,
     pub api_id: String,
@@ -42,6 +44,7 @@ impl Default for Config {
             auth_url: "https://auth.alipan.com".into(),
             api_url: "https://api.alipan.com".into(),
             user_url: "https://user.alipan.com".into(),
+            member_url: "https://member.aliyundrive.com".into(),
             download_referer: "https://www.aliyundrive.com/".into(),
             api_id: "pJZInNHN2dZWk8qg".into(),
             app_id: "25dzX3vbYqktVxyX".into(),
@@ -65,13 +68,14 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Use one base URL for auth, API, and user endpoints, for proxies or test servers.
+    /// Use one base URL for auth, API, user, and member endpoints, for proxies or test servers.
     pub fn with_base_url(base: &str) -> Self {
         let base = base.trim_end_matches('/').to_owned();
         Self {
             auth_url: base.clone(),
             api_url: base.clone(),
-            user_url: base,
+            user_url: base.clone(),
+            member_url: base,
             ..Self::default()
         }
     }
@@ -84,6 +88,15 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_host_and_base_url_override() {
+        assert_eq!(Config::default().member_url, "https://member.aliyundrive.com");
+        let config = Config::with_base_url("http://127.0.0.1:1234/");
+        for url in [&config.auth_url, &config.api_url, &config.user_url, &config.member_url] {
+            assert_eq!(url, "http://127.0.0.1:1234");
+        }
+    }
 
     #[test]
     fn default_device_identity() {

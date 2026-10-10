@@ -1,5 +1,6 @@
 //! Isolated live API contract tests. Reports contain no raw responses or credentials.
 //! Each run draws one lucky bottle when the quota query succeeds and reports remaining draws.
+//! The daily sign-in endpoint is checked on every run for request success, not sign-in completion.
 
 use std::{collections::BTreeMap, fs, future::Future, path::Path, time::Duration};
 
@@ -25,6 +26,7 @@ const METHODS: &[&str] = &[
     "get_sbox_info",
     "get_albums_info",
     "get_vip_info",
+    "sign_in",
     "get_bottle_user_limit",
     "fish_bottle",
     "list_files",
@@ -499,6 +501,7 @@ async fn account(client: &Client, report: &mut Report) {
     };
     let _ = report.case("list_albums", client.list_albums(&opts)).await;
     let _ = report.case("list_all_albums", client.list_all_albums(&opts)).await;
+    let _ = report.case("sign_in", client.sign_in()).await;
     bottles(client, report).await;
 }
 

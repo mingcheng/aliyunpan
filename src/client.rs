@@ -20,6 +20,7 @@ pub(crate) enum Host {
     Auth,
     Api,
     User,
+    Member,
 }
 
 /// Aliyun Drive web API client. Cheap to clone and share across tasks through internal `Arc` storage.
@@ -362,6 +363,7 @@ impl Client {
             Host::Auth => &cfg.auth_url,
             Host::Api => &cfg.api_url,
             Host::User => &cfg.user_url,
+            Host::Member => &cfg.member_url,
         };
         let url = format!("{}{path}", base.trim_end_matches('/'));
         let referer = cfg.referer();
