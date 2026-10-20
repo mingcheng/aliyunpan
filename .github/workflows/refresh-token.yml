@@ -3,7 +3,7 @@ name: Refresh Token Keepalive
 on:
   schedule:
     # Check every 2 hours at 23 and 53 minutes past the hour.
-    - cron: "23,53 */2 * * *"
+    - cron: "* */12 * * *"
   workflow_dispatch:
 
 permissions:
